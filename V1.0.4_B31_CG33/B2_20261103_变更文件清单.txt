@@ -1,0 +1,11 @@
+本批相较 V1.0.1.zip 实际变化的源文件（共9 个）：
+
+QINGJIAOBAN/USER/main.c
+QINGJIAOBAN/USER/main_head.h
+QINGJIAOBAN/USER/stm32f10x_it.c
+STM32L151/Core/Src/main.c
+STM32L151/Core/Src/stm32l1xx_it.c
+STM32L151/Software/inc/agreement_head.h
+STM32L151/Software/inc/usart_head.h
+STM32L151/Software/src/agreement_code.c
+STM32L151/Software/src/usart_code.c

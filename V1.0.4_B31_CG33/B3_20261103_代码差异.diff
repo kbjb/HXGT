@@ -1,0 +1,2050 @@
+--- a/B2_HOST_TESTS/run_master_tests.sh
++++ b/B2_HOST_TESTS/run_master_tests.sh
+@@ -5,9 +5,9 @@
+ OUT=$(mktemp /tmp/b2_master_test_XXXXXX)
+ trap 'rm -f "$OUT"' EXIT
+ cc -std=c99 -O1 -g -Wall -Wextra -Wno-unused-variable \
+-  -fsanitize=address,undefined -fno-omit-frame-pointer \
++  -fsanitize=undefined -fstack-protector-all -fno-omit-frame-pointer \
+   -I "$HERE" -I "$ROOT/STM32L151/Software/inc" \
+   "$ROOT/STM32L151/Software/src/usart_code.c" \
+   "$ROOT/STM32L151/Software/src/agreement_code.c" \
+   "$HERE/test_main.c" -o "$OUT"
+-ASAN_OPTIONS=detect_leaks=0 "$OUT"
++UBSAN_OPTIONS=halt_on_error=1 "$OUT"
+--- a/B2_HOST_TESTS/test_main.c
++++ b/B2_HOST_TESTS/test_main.c
+@@ -45,6 +45,22 @@
+ uint32_t HAL_GetTick(void) { return fake_tick; }
+ uint8_t AT24C512_WriteByte(uint16_t addr, uint8_t data) { eep[addr]=data; writes++; return EEPROM_OK; }
+ uint8_t AT24C512_ReadByte(uint16_t addr, uint8_t *data) { *data=eep[addr]; return EEPROM_OK; }
++/* [B3] Match new EEPROM API using a lightweight test double. */
++uint8_t Eep_Save_Password(uint32_t password) {
++    if (password > 999999UL) return 0;
++    Driver_Calibration_Password=password;
++    writes++;
++    return 1;
++}
++uint8_t Eep_Get_Node_Count(uint16_t *count) {
++    uint16_t n;
++    if (!count) return 0;
++    n=(uint16_t)(((uint16_t)eep[NODE_INPUT_NUM_ADDR_START]<<8) |
++                 (uint16_t)eep[NODE_INPUT_NUM_ADDR_START+1]);
++    if (n > MAX_INDEX_ADDR) return 0;
++    *count=n;
++    return 1;
++}
+ uint8_t Eep_Output_Node(uint16_t index, void *out) {
+     uint8_t *p=(uint8_t*)out; unsigned i;
+     for(i=0;i<sizeof(EEP_NODE);i++) p[i]=(uint8_t)(0xA0U + i + index);
+@@ -127,13 +143,14 @@
+     len=u2(0x03,dat,3,f); before=ntx2;
+     feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+     CHECK(ntx2==before+7 && tx2[before+1]==0xC3 && writes==0);
+-    dat[3]=0x30; len=u2(0x03,dat,4,f); before=ntx2;
+-    feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+-    CHECK(ntx2==before+7 && tx2[before+1]==0x83 && writes==4);
++    dat[1]=0x0A; dat[2]=0x12; dat[3]=0x34; /* Valid six-digit password */
++    len=u2(0x03,dat,4,f); before=ntx2;
++    feed(&huart2,f,len); UART_Process_Received(UART2_ID);
++    CHECK(ntx2==before+7 && tx2[before+1]==0x83 && writes==1);
+ 
+     len=u2(0x05,NULL,0,f); before=ntx2;
+     feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+-    CHECK(ntx2==before+7 && tx2[before+1]==0xC5 && writes==4);
++    CHECK(ntx2==before+7 && tx2[before+1]==0xC5 && writes==1);
+ 
+     eep[NODE_INPUT_NUM_ADDR_START]=0; eep[NODE_INPUT_NUM_ADDR_START+1]=2;
+     dat[0]=0; dat[1]=1;
+--- a/B2_HOST_TESTS/test_qing.py
++++ b/B2_HOST_TESTS/test_qing.py
+@@ -97,7 +97,7 @@
+     c=Path(d)/'test_qing_generated.c'
+     exe=Path(d)/'run_qing'
+     c.write_text(header+functions+'\n'+maintext,encoding='latin1')
+-    args=['cc','-std=c99','-O1','-g','-Wall','-Wextra','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)]
++    args=['cc','-std=c99','-O1','-g','-Wall','-Wextra','-fsanitize=undefined','-fstack-protector-all','-fno-omit-frame-pointer',str(c),'-o',str(exe)]
+     cp=subprocess.run(args,check=True,capture_output=True,text=True)
+     if cp.stderr: print(cp.stderr)
+-    subprocess.run([str(exe)],check=True,env={**os.environ,'ASAN_OPTIONS':'detect_leaks=0'})
++    subprocess.run([str(exe)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
+--- a/STM32L151/Core/Src/main.c
++++ b/STM32L151/Core/Src/main.c
+@@ -62,6 +62,9 @@
+ /* USER CODE BEGIN PV */
+ float Power_vol = 0;
+ PAGE_ID page_id = page_logo;
++/* [B3] Read-only boot result: 1=I2C usable, 0=failure. Watch
++ * Eep_Get_Storage_State() and Eep_Get_Record_State() separately. */
++volatile uint8_t B3_Eeprom_Boot_OK = 0U;
+ 
+ /* USER CODE END PV */
+ 
+@@ -125,7 +128,19 @@
+   PCF8563_Init(&hi2c2);
+   OLED_Init();
+   Page_init();
+-  Eep_Data_Get();
++  /* [B3] Read-only boot probe/load, never auto-rewrite legacy EEPROM. */
++  B3_Eeprom_Boot_OK = Eep_Data_Get();
++
++  /* [B3] Service-only, explicitly opt-in after verified off-device backup.
++   * Both switches in App_Eep.h ship disabled; re-disable after migration. */
++#if EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE
++  if (B3_Eeprom_Boot_OK)
++      (void)Eep_Approve_Legacy_Calibration_Upgrade();
++#endif
++#if EEP_B3_SERVICE_IMPORT_LEGACY_COUNT > 0
++  if (B3_Eeprom_Boot_OK && Eep_Approve_Legacy_Record_Import())
++      (void)Eep_Import_Legacy_Records(EEP_B3_SERVICE_IMPORT_LEGACY_COUNT);
++#endif
+   
+   //Test();
+   /* USER CODE END 2 */
+--- a/STM32L151/Software/inc/App_Eep.h
++++ b/STM32L151/Software/inc/App_Eep.h
+@@ -1,81 +1,119 @@
+ #ifndef __APP_EEP_H
+ #define __APP_EEP_H
+-
+ 
+ #include "main.h"
+ #include "param_head.h"
+ 
+-#define     EEP_MAX_ADDR                    65536
++/* [B3] AT24C512 physical 64 KiB array. NEW storage does not overlap
++ * the old firmware's record bytes (0x0000..0x05DB) or its calibration
++ * data in the last 35 bytes of EEPROM.
++ *
++ * Calibration copies A/B: 64 byte CRC-checked snapshots, in separate
++ * 128-byte pages. Record counter copies A/B: same journal scheme.
++ * The active marker is always written LAST and the unused slot is not
++ * invalidated until a newer record has been committed.
++ */
++#define EEP_MAX_ADDR                 65536UL
++#define EEP_B3_RECORD_START          0x2000U
++#define EEP_B3_CAL_SLOT_A            0xE000U
++#define EEP_B3_CAL_SLOT_B            0xE080U
++#define EEP_B3_NODE_SLOT_A           0xE100U
++#define EEP_B3_NODE_SLOT_B           0xE180U
++#define EEP_B3_SLOT_LEN              64U
++#define MAX_INDEX_ADDR              100U
++#define EEP_NODE_ENCODED_LEN         15U
+ 
+-#define     EEP_USE_FLAG_SIZE               1
+-#define     EEP_USE_FLAG_START              EEP_MAX_ADDR-EEP_USE_FLAG_SIZE
++/* [B3] SERVICE-ONLY compile-time opt-in. SHIPPED DISABLED.
++ * Never enable without an independently verified, complete 64-KiB
++ * backup of the actual physical EEPROM and calibration review.
++ * Rebuild with these set back to zero after the one-time service. */
++#define EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE  0
++#define EEP_B3_SERVICE_IMPORT_LEGACY_COUNT        0
+ 
+-#define     EEP_PASSWORD_SIZE               4
+-#define     EEP_PASSWORD_START              EEP_USE_FLAG_START-EEP_PASSWORD_SIZE
++/* [B3] Legacy offsets: READ-ONLY, kept for service/backup inspection.
++ * The old storage markers/counters overlap calibration bytes. Never
++ * write any of these addresses through the B3 application.
++ */
++#define EEP_USE_FLAG_START          65535U
++#define EEP_PASSWORD_START          65531U
++#define CG_LEFT_180_START           65529U
++#define CG_LEFT_0_START             65527U
++#define CG_RIGHT_180_START          65525U
++#define CG_RIGHT_0_START            65523U
++#define CG_Temperature_START        65519U
++#define GJ_1410_AD_START            65517U
++#define GJ_1435_AD_START            65515U
++#define GJ_1470_AD_START            65513U
++#define GJ_Temperature_START        65509U
++#define CZ_AD_START                 65507U
++#define HB_AD_START                 65505U
++#define CH_Temperature_START        65501U
++#define NODE_INDEX_ADDR_START       65503U
++#define NODE_INPUT_NUM_ADDR_START   65505U
+ 
+-#define     CG_LEFT_180_SIZE                2
+-#define     CG_LEFT_180_START               EEP_PASSWORD_START-CG_LEFT_180_SIZE
+-#define     CG_LEFT_0_SIZE                  2
+-#define     CG_LEFT_0_START                 CG_LEFT_180_START-CG_LEFT_0_SIZE
+-#define     CG_RIGHT_180_SIZE               2
+-#define     CG_RIGHT_180_START              CG_LEFT_0_START-CG_RIGHT_180_SIZE
+-#define     CG_RIGHTT_0_SIZE                2
+-#define     CG_RIGHT_0_START                CG_RIGHT_180_START-CG_RIGHTT_0_SIZE
+-#define     CG_Temperature_SIZE             4
+-#define     CG_Temperature_START            CG_RIGHT_0_START-CG_Temperature_SIZE
++/* A legacy read may have to use RAM defaults for damaged values.
++ * No automatic rewrite/migration is ever performed on power-up. */
++#define EEP_LEGACY_BAD_PASSWORD     0x01U
++#define EEP_LEGACY_BAD_CG           0x02U
++#define EEP_LEGACY_BAD_GJ           0x04U
++#define EEP_LEGACY_BAD_CH           0x08U
++#define EEP_LEGACY_TEMP_UNCERTAIN   0x10U
+ 
++typedef enum
++{
++    EEP_STATE_NOT_READY = 0,
++    EEP_STATE_B3_VALID = 1,
++    EEP_STATE_LEGACY_LOCKED = 2,
++    EEP_STATE_FACTORY_EMPTY = 3,
++    EEP_STATE_B3_CORRUPT = 4,
++    EEP_STATE_IO_ERROR = 5
++} EEP_STORAGE_STATE;
+ 
+-#define     GJ_1410_AD_SIZE                 2
+-#define     GJ_1410_AD_START                CG_Temperature_START-GJ_1410_AD_SIZE
+-#define     GJ_1435_AD_SIZE                 2
+-#define     GJ_1435_AD_START                GJ_1410_AD_START-GJ_1435_AD_SIZE
+-#define     GJ_1470_AD_SIZE                 2
+-#define     GJ_1470_AD_START                GJ_1435_AD_START-GJ_1470_AD_SIZE
+-#define     GJ_Temperature_SIZE             4
+-#define     GJ_Temperature_START            GJ_1470_AD_START-GJ_Temperature_SIZE
++typedef enum
++{
++    EEP_RECORD_NOT_READY = 0,
++    EEP_RECORD_B3_VALID = 1,
++    EEP_RECORD_EMPTY = 2,
++    EEP_RECORD_CORRUPT = 3,
++    EEP_RECORD_IO_ERROR = 4
++} EEP_RECORD_STATE;
+ 
++uint8_t Eep_Data_Get(void); /* [B3] Read-only boot load; 1=I2C usable */
+ 
+-#define     CZ_AD_SIZE                      2
+-#define     CZ_AD_START                     GJ_Temperature_START-CZ_AD_SIZE
+-#define     HB_AD_SIZE                      2
+-#define     HB_AD_START                     CZ_AD_START-HB_AD_SIZE
+-#define     CH_Temperature_SIZE             4
+-#define     CH_Temperature_START            HB_AD_START-CH_Temperature_SIZE
++/* [B3] A legacy EEPROM cannot be silently promoted. Run a full
++ * EEPROM backup & compare calibration data first, then explicitly
++ * call the authorization API in a service/debug session. */
++uint8_t Eep_Approve_Legacy_Calibration_Upgrade(void);
++uint8_t Eep_Approve_Legacy_Record_Import(void); /* separate explicit authorization */
++uint8_t Eep_Save_CG_Calibration(CG_Calibration_Param_Str data);
++uint8_t Eep_Save_GJ_Calibration(GJ_Calibration_Param_Str data);
++uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str data);
++uint8_t Eep_Save_Password(uint32_t password);
+ 
+-#define     NODE_INDEX_SIZE                 2
+-#define     NODE_INDEX_ADDR_START           CH_Temperature_START+NODE_INDEX_SIZE
++EEP_STORAGE_STATE Eep_Get_Storage_State(void);
++EEP_RECORD_STATE Eep_Get_Record_State(void);
++uint8_t Eep_Get_Legacy_Warnings(void);
+ 
+-#define     NODE_INPUT_NUM_SIZE             2
+-#define     NODE_INPUT_NUM_ADDR_START       NODE_INDEX_ADDR_START+NODE_INPUT_NUM_SIZE
++/* The deprecated raw-write APIs intentionally reject calibration writes.
++ * Call the corresponding atomic Eep_Save_* function instead. */
++uint8_t Eep_Write_For_Signed16(uint16_t addr, int16_t data);
++uint8_t Eep_Write_For_Unsigned16(uint16_t addr, uint16_t data);
++uint8_t Eep_Write_For_Float(uint16_t addr, float data);
++uint8_t Eep_Write_For_Unsigned32(uint16_t addr, uint32_t data);
+ 
++/* B3 records are stored at EEP_B3_RECORD_START (15 bytes per entry).
++ * Eep_Input_Node(index,...) is an append operation: index == count.
++ * For node input/read return 0 on success and nonzero on error.
++ * Eep_Clear_Node returns 1 on logical clear success, 0 on failure. */
++uint8_t Eep_Get_Node_Count(uint16_t *count);
++uint8_t Eep_Input_Node(uint16_t index, EEP_NODE node);
++uint8_t Eep_Output_Node(uint16_t index, void *node);
++uint8_t Eep_Clear_Node(void);
+ 
+-#define     MAX_INDEX_ADDR                   100    //最大索引地址
+-
+-
+-uint8_t Eep_Data_Get(void);
+-uint8_t Eep_Write_For_Signed16(uint16_t addr,int16_t data);
+-uint8_t Eep_Write_For_Unsigned16(uint16_t addr,uint16_t data);
+-uint8_t Eep_Write_For_Float(uint16_t addr,float data);
+-uint8_t Eep_Write_For_Unsigned32(uint16_t addr,uint32_t data);
+-
+-
+-uint8_t Eep_Input_Node(uint16_t index,EEP_NODE Eep_Node_Str);
+-uint8_t Eep_Output_Node(uint16_t index,void*Eep_Node_Str);
+-
+-
++/* Read-only legacy inspection and EXPLICIT opt-in import into B3.
++ * The verified_count MUST come from an independent external backup.
++ * Never automatically trust the overlapped legacy count addresses. */
++uint8_t Eep_Read_Legacy_Record(uint16_t index, void *node);
++uint8_t Eep_Import_Legacy_Records(uint16_t verified_count);
+ 
+ #endif
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+--- a/STM32L151/Software/inc/at24c512_head.h
++++ b/STM32L151/Software/inc/at24c512_head.h
+@@ -3,19 +3,25 @@
+ 
+ #include "main.h"
+ 
++/* [B3] AT24C512: 512 Kbit = 65536 bytes, 512 physical pages x 128 bytes.
++ * Address pins A2/A1/A0 are assumed LOW: 7-bit address 0x50.
++ * STM32 HAL expects the LEFT-SHIFTED 8-bit address (0xA0).
++ * Verify the actual hardware pins and WP before enabling writes.
++ */
++#define AT24C512_ADDR             0xA0U
++#define EEPROM_PAGE_SIZE          128U
++#define EEPROM_MAX_SIZE           65536UL
++#define EEPROM_IO_TIMEOUT_MS      100U
++#define EEPROM_ACK_POLL_TRIES     10U
+ 
+-// AT24C512设备地址（A2=A1=A0=0）
+-#define AT24C512_ADDR    0xA0
+-#define EEPROM_PAGE_SIZE 128
+-#define EEPROM_MAX_SIZE  65536  // 64KB
++#define EEPROM_OK                 0U
++#define EEPROM_ERROR              1U
++#define EEPROM_TIMEOUT            2U
++#define EEPROM_VERIFY_ERROR       3U
++#define EEPROM_INVALID_ARG        4U
+ 
+-// 错误代码定义
+-#define EEPROM_OK        0
+-#define EEPROM_ERROR     1
+-#define EEPROM_TIMEOUT   2
+-
+-// 函数声明
+ uint8_t AT24C512_Init(void);
++uint8_t AT24C512_Check(void); /* [B3] Non-destructive I2C ACK probe */
+ uint8_t AT24C512_WriteByte(uint16_t addr, uint8_t data);
+ uint8_t AT24C512_ReadByte(uint16_t addr, uint8_t *data);
+ uint8_t AT24C512_WritePage(uint16_t page_num, uint8_t *data);
+@@ -23,11 +29,6 @@
+ uint8_t AT24C512_WriteBuffer(uint16_t addr, uint8_t *data, uint16_t len);
+ uint8_t AT24C512_ReadBuffer(uint16_t addr, uint8_t *data, uint16_t len);
+ uint8_t AT24C512_WriteCrossPages(uint16_t start_addr, uint8_t *data, uint16_t len);
+-uint8_t AT24C512_Check(void);
+ void AT24C512_Delay(uint32_t delay);
+ 
+-
+-
+-
+ #endif
+-
+--- a/STM32L151/Software/src/App_Eep.c
++++ b/STM32L151/Software/src/App_Eep.c
+@@ -1,425 +1,677 @@
+ #include "App_Eep.h"
+ #include "at24c512_head.h"
+-#include "param_head.h"
+-#include "agreement_head.h"
+-
+-
++#include <string.h>
++
++/* [B3] On-disk snapshot format (64 bytes):
++ * [0..3] magic ("GJB3" or "RCB3"), [4] version=3, [5] reserved,
++ * [6..9] sequence (BE), [10..60] typed payload + 0xFF pad,
++ * [61..62] CRC16-CCITT(FALSE) over bytes [0..60],
++ * [63] commit marker 0xA5 (written last).
++ *
++ * The A and B copies live in separate physical 128-byte pages.
++ * A partially written slot is rejected; an older valid copy remains.
++ */
++#define B3_VERSION         3U
++#define B3_COMMIT          0xA5U
++#define B3_CRC_OFFSET      61U
++#define B3_MARKER_OFFSET   63U
++#define B3_MAGIC_CAL0      'G'
++#define B3_MAGIC_CAL1      'J'
++#define B3_MAGIC_CAL2      'B'
++#define B3_MAGIC_CAL3      '3'
++#define B3_MAGIC_REC0      'R'
++#define B3_MAGIC_REC1      'C'
++#define B3_MAGIC_REC2      'B'
++#define B3_MAGIC_REC3      '3'
++
++typedef char EEP_NODE_Must_Be_15_Bytes[(sizeof(EEP_NODE) == EEP_NODE_ENCODED_LEN) ? 1 : -1];
++typedef char EEP_Float_Must_Be_32_Bit[(sizeof(float) == 4U) ? 1 : -1];
++
++typedef struct
++{
++    uint32_t password;
++    CG_Calibration_Param_Str cg;
++    GJ_Calibration_Param_Str gj;
++    CH_Calibration_Param_Str ch;
++} B3_CAL_DATA;
++
++static EEP_STORAGE_STATE cal_state = EEP_STATE_NOT_READY;
++static EEP_RECORD_STATE record_state = EEP_RECORD_NOT_READY;
++static uint8_t legacy_warning_mask = 0U;
++static uint8_t legacy_upgrade_approved = 0U;
++static uint8_t legacy_record_import_approved = 0U;
++static int8_t cal_active_slot = -1;
++static int8_t record_active_slot = -1;
++static uint32_t cal_sequence = 0U;
++static uint32_t record_sequence = 0U;
++static uint16_t record_count = 0U;
++
++static uint16_t B3_Crc16(const uint8_t *data, uint8_t length)
++{
++    uint16_t crc = 0xFFFFU;
++    uint8_t i, bit;
++    for (i = 0U; i < length; ++i)
++    {
++        crc ^= (uint16_t)((uint16_t)data[i] << 8);
++        for (bit = 0U; bit < 8U; ++bit)
++            crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U)
++                                  : (uint16_t)(crc << 1);
++    }
++    return crc;
++}
++
++static void Put16(uint8_t *dest, uint16_t value)
++{
++    dest[0] = (uint8_t)(value >> 8);
++    dest[1] = (uint8_t)value;
++}
++
++static uint16_t Get16(const uint8_t *src)
++{
++    return (uint16_t)(((uint16_t)src[0] << 8) | src[1]);
++}
++
++static void Put32(uint8_t *dest, uint32_t value)
++{
++    dest[0] = (uint8_t)(value >> 24);
++    dest[1] = (uint8_t)(value >> 16);
++    dest[2] = (uint8_t)(value >> 8);
++    dest[3] = (uint8_t)value;
++}
++
++static uint32_t Get32(const uint8_t *src)
++{
++    return ((uint32_t)src[0] << 24) | ((uint32_t)src[1] << 16) |
++           ((uint32_t)src[2] << 8) | (uint32_t)src[3];
++}
++
++static int16_t GetSigned16(const uint8_t *src)
++{
++    uint16_t raw = Get16(src);
++    return (raw < 0x8000U) ? (int16_t)raw :
++           (int16_t)((int32_t)raw - 65536L);
++}
++
++static void PutFloat(uint8_t *dest, float value)
++{
++    uint32_t raw;
++    memcpy(&raw, &value, sizeof(raw));
++    Put32(dest, raw);
++}
++
++static float GetFloat(const uint8_t *src)
++{
++    uint32_t raw = Get32(src);
++    float value;
++    memcpy(&value, &raw, sizeof(value));
++    return value;
++}
++
++static uint8_t ValidTemp(float t)
++{
++    /* NaN fails all comparisons; infinities fail the bounded range. */
++    return (t >= -40.0f && t <= 100.0f) ? 1U : 0U;
++}
++
++static uint8_t ValidCG(const CG_Calibration_Param_Str *p)
++{
++    return (p->CG_Max_Left_Ad < p->CG_Zero_Left_Ad &&
++            p->CG_Max_Right_Ad > p->CG_Zero_Right_Ad &&
++            ValidTemp(p->temp)) ? 1U : 0U;
++}
++
++static uint8_t ValidGJ(const GJ_Calibration_Param_Str *p)
++{
++    uint16_t a = p->GJ_1410_Ad, b = p->GJ_1435_Ad,
++             c = p->GJ_1470_Ad;
++    return ((((a < b) && (b < c)) || ((a > b) && (b > c))) &&
++             ValidTemp(p->temp)) ? 1U : 0U;
++}
++
++static uint8_t ValidCH(const CH_Calibration_Param_Str *p)
++{
++    return (p->CZ_Ad != 0xFFFFU && p->HB_Ad != 0xFFFFU &&
++            p->CZ_Ad != p->HB_Ad && ValidTemp(p->temp)) ? 1U : 0U;
++}
++
++static uint8_t ValidCal(const B3_CAL_DATA *p)
++{
++    return (p->password <= 999999UL && ValidCG(&p->cg) &&
++            ValidGJ(&p->gj) && ValidCH(&p->ch)) ? 1U : 0U;
++}
++
++static void B3_MakeCal(uint8_t buf[EEP_B3_SLOT_LEN],
++                       const B3_CAL_DATA *c, uint32_t sequence)
++{
++    memset(buf, 0xFF, EEP_B3_SLOT_LEN);
++    buf[0]='G'; buf[1]='J'; buf[2]='B'; buf[3]='3';
++    buf[4]=B3_VERSION; buf[5]=0U;
++    Put32(buf+6, sequence);
++    Put32(buf+10, c->password);
++    Put16(buf+14, (uint16_t)c->cg.CG_Zero_Left_Ad);
++    Put16(buf+16, (uint16_t)c->cg.CG_Max_Left_Ad);
++    Put16(buf+18, (uint16_t)c->cg.CG_Zero_Right_Ad);
++    Put16(buf+20, (uint16_t)c->cg.CG_Max_Right_Ad);
++    PutFloat(buf+22, c->cg.temp);
++    Put16(buf+26, c->gj.GJ_1410_Ad);
++    Put16(buf+28, c->gj.GJ_1435_Ad);
++    Put16(buf+30, c->gj.GJ_1470_Ad);
++    PutFloat(buf+32, c->gj.temp);
++    Put16(buf+36, c->ch.CZ_Ad);
++    Put16(buf+38, c->ch.HB_Ad);
++    PutFloat(buf+40, c->ch.temp);
++    Put16(buf+B3_CRC_OFFSET, B3_Crc16(buf, B3_CRC_OFFSET));
++    buf[B3_MARKER_OFFSET] = B3_COMMIT;
++}
++
++static void B3_ReadCal(const uint8_t *buf, B3_CAL_DATA *c)
++{
++    c->password = Get32(buf+10);
++    c->cg.CG_Zero_Left_Ad  = GetSigned16(buf+14);
++    c->cg.CG_Max_Left_Ad   = GetSigned16(buf+16);
++    c->cg.CG_Zero_Right_Ad = GetSigned16(buf+18);
++    c->cg.CG_Max_Right_Ad  = GetSigned16(buf+20);
++    c->cg.temp             = GetFloat(buf+22);
++    c->gj.GJ_1410_Ad      = Get16(buf+26);
++    c->gj.GJ_1435_Ad      = Get16(buf+28);
++    c->gj.GJ_1470_Ad      = Get16(buf+30);
++    c->gj.temp             = GetFloat(buf+32);
++    c->ch.CZ_Ad           = Get16(buf+36);
++    c->ch.HB_Ad           = Get16(buf+38);
++    c->ch.temp            = GetFloat(buf+40);
++}
++
++static void B3_MakeRecordMeta(uint8_t buf[EEP_B3_SLOT_LEN],
++                              uint16_t count, uint32_t sequence)
++{
++    memset(buf, 0xFF, EEP_B3_SLOT_LEN);
++    buf[0]='R'; buf[1]='C'; buf[2]='B'; buf[3]='3';
++    buf[4]=B3_VERSION; buf[5]=0U;
++    Put32(buf+6, sequence);
++    Put16(buf+10, count);
++    Put16(buf+B3_CRC_OFFSET, B3_Crc16(buf, B3_CRC_OFFSET));
++    buf[B3_MARKER_OFFSET] = B3_COMMIT;
++}
++
++static uint8_t B3_IsBlank(const uint8_t *buf)
++{
++    uint8_t i;
++    for (i = 0U; i < EEP_B3_SLOT_LEN; ++i)
++        if (buf[i] != 0xFFU) return 0U;
++    return 1U;
++}
++
++static uint8_t B3_SlotValid(const uint8_t *buf, uint8_t is_cal)
++{
++    B3_CAL_DATA decoded;
++    uint16_t checksum;
++    if (buf[3] != '3' || buf[4] != B3_VERSION ||
++        buf[5] != 0U || buf[B3_MARKER_OFFSET] != B3_COMMIT) return 0U;
++    if (is_cal)
++    {
++        if (buf[0] != 'G' || buf[1] != 'J' || buf[2] != 'B') return 0U;
++    }
++    else
++    {
++        if (buf[0] != 'R' || buf[1] != 'C' || buf[2] != 'B') return 0U;
++    }
++    checksum = B3_Crc16(buf, B3_CRC_OFFSET);
++    if (Get16(buf+B3_CRC_OFFSET) != checksum) return 0U;
++    if (is_cal)
++    {
++        B3_ReadCal(buf, &decoded);
++        return ValidCal(&decoded);
++    }
++    return (Get16(buf+10) <= MAX_INDEX_ADDR) ? 1U : 0U;
++}
++
++static uint8_t B3_SequenceNewer(uint32_t a, uint32_t b)
++{
++    /* Unsigned subtraction handles a simple 32-bit sequence wraparound. */
++    uint32_t delta = a - b;
++    return (delta != 0U && delta < 0x80000000UL) ? 1U : 0U;
++}
++
++/* return: 0=both blank, 1=valid slot, 2=corrupt/no valid,
++ * 3=read failure. active: 0=A / 1=B / -1=none. */
++static uint8_t B3_FindSlot(uint16_t slot_a, uint16_t slot_b,
++                           uint8_t is_cal, uint8_t chosen[EEP_B3_SLOT_LEN],
++                           int8_t *active, uint32_t *sequence)
++{
++    uint8_t a[EEP_B3_SLOT_LEN], b[EEP_B3_SLOT_LEN];
++    uint8_t valid_a, valid_b;
++    if (AT24C512_ReadBuffer(slot_a, a, EEP_B3_SLOT_LEN) != EEPROM_OK ||
++        AT24C512_ReadBuffer(slot_b, b, EEP_B3_SLOT_LEN) != EEPROM_OK)
++        return 3U;
++    valid_a = B3_SlotValid(a, is_cal);
++    valid_b = B3_SlotValid(b, is_cal);
++    if (!valid_a && !valid_b)
++    {
++        *active = -1;
++        *sequence = 0U;
++        return (B3_IsBlank(a) && B3_IsBlank(b)) ? 0U : 2U;
++    }
++    *active = valid_b && (!valid_a ||
++              B3_SequenceNewer(Get32(b+6), Get32(a+6))) ? 1 : 0;
++    memcpy(chosen, (*active == 0) ? a : b, EEP_B3_SLOT_LEN);
++    *sequence = Get32(chosen+6);
++    return 1U;
++}
++
++/* [B3] Atomic-ish A/B journal commit:
++ * (1) invalidate TARGET marker; (2) write new CRC-covered payload;
++ * (3) read back and compare; (4) write the 0xA5 commit marker LAST;
++ * (5) read back and validate. The old valid page is untouched.
++ */
++static uint8_t B3_Commit(uint16_t slot_a, uint16_t slot_b, uint8_t is_cal,
++                         const uint8_t data[EEP_B3_SLOT_LEN],
++                         int8_t *active, uint32_t *sequence)
++{
++    uint8_t verify[EEP_B3_SLOT_LEN];
++    uint16_t target = (*active == 0) ? slot_b : slot_a;
++    uint8_t invalid = 0U;
++    uint8_t marker = B3_COMMIT;
++
++    if (AT24C512_WriteByte((uint16_t)(target+B3_MARKER_OFFSET), invalid)
++        != EEPROM_OK) return 0U;
++    if (AT24C512_WriteBuffer(target, (uint8_t *)data, B3_MARKER_OFFSET)
++        != EEPROM_OK) return 0U;
++    if (AT24C512_ReadBuffer(target, verify, B3_MARKER_OFFSET)
++        != EEPROM_OK) return 0U;
++    if (memcmp(data, verify, B3_MARKER_OFFSET) != 0) return 0U;
++    if (AT24C512_WriteByte((uint16_t)(target+B3_MARKER_OFFSET), marker)
++        != EEPROM_OK) return 0U;
++    if (AT24C512_ReadBuffer(target, verify, EEP_B3_SLOT_LEN)
++        != EEPROM_OK) return 0U;
++    if (memcmp(data, verify, EEP_B3_SLOT_LEN) != 0 ||
++        !B3_SlotValid(verify, is_cal)) return 0U;
++
++    *active = (*active == 0) ? 1 : 0;
++    *sequence = Get32(data+6);
++    return 1U;
++}
++
++static void B3_CalibrationToGlobals(const B3_CAL_DATA *c)
++{
++    Driver_Calibration_Password = c->password;
++    CG_Param = c->cg;
++    GJ_Param = c->gj;
++    CH_Param = c->ch;
++}
++
++static void B3_CalibrationFromGlobals(B3_CAL_DATA *c)
++{
++    c->password = Driver_Calibration_Password;
++    c->cg = CG_Param;
++    c->gj = GJ_Param;
++    c->ch = CH_Param;
++}
++
++static uint8_t B3_SaveCalibration(const B3_CAL_DATA *new_data)
++{
++    uint8_t buf[EEP_B3_SLOT_LEN];
++    if (!ValidCal(new_data)) return 0U;
++    if (cal_state == EEP_STATE_B3_CORRUPT ||
++        cal_state == EEP_STATE_IO_ERROR ||
++        cal_state == EEP_STATE_NOT_READY) return 0U;
++    if (cal_state == EEP_STATE_LEGACY_LOCKED &&
++        !legacy_upgrade_approved) return 0U;
++    B3_MakeCal(buf, new_data, cal_sequence + 1U);
++    if (!B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
++                   buf, &cal_active_slot, &cal_sequence)) return 0U;
++    B3_CalibrationToGlobals(new_data);
++    cal_state = EEP_STATE_B3_VALID;
++    legacy_upgrade_approved = 0U;
++    return 1U;
++}
++
++static uint8_t B3_LoadLegacy(uint8_t *found)
++{
++    uint8_t flag, password_bytes[4], buf[2];
++    uint8_t pw_ok, cg_ok, gj_ok, ch_ok;
++    uint32_t candidate_password;
++    CG_Calibration_Param_Str cg = CG_Param;
++    GJ_Calibration_Param_Str gj = GJ_Param;
++    CH_Calibration_Param_Str ch = CH_Param;
++
++    *found = 0U;
++    legacy_warning_mask = 0U;
++    if (AT24C512_ReadByte(EEP_USE_FLAG_START, &flag) != EEPROM_OK ||
++        AT24C512_ReadBuffer(EEP_PASSWORD_START, password_bytes, 4U)
++        != EEPROM_OK) return 0U;
++    candidate_password = Get32(password_bytes);
++    pw_ok = (candidate_password <= 999999UL) ? 1U : 0U;
++
++    /* [B3] Read the ORIGINAL offsets into STAGED RAM first.
++     * Legacy temperature writes used inconsistent +3/+4 offsets and
++     * overlap neighboring ADC data; none of those floats are trusted.
++     * The old record counter overlaps CH parameters.
++     */
++    if (AT24C512_ReadBuffer(CG_LEFT_180_START, buf, 2U) != EEPROM_OK) return 0U;
++    cg.CG_Max_Left_Ad=GetSigned16(buf);
++    if (AT24C512_ReadBuffer(CG_LEFT_0_START, buf, 2U) != EEPROM_OK) return 0U;
++    cg.CG_Zero_Left_Ad=GetSigned16(buf);
++    if (AT24C512_ReadBuffer(CG_RIGHT_180_START, buf, 2U) != EEPROM_OK) return 0U;
++    cg.CG_Max_Right_Ad=GetSigned16(buf);
++    if (AT24C512_ReadBuffer(CG_RIGHT_0_START, buf, 2U) != EEPROM_OK) return 0U;
++    cg.CG_Zero_Right_Ad=GetSigned16(buf);
++    cg_ok=ValidCG(&cg);
++
++    if (AT24C512_ReadBuffer(GJ_1410_AD_START, buf, 2U) != EEPROM_OK) return 0U;
++    gj.GJ_1410_Ad=Get16(buf);
++    if (AT24C512_ReadBuffer(GJ_1435_AD_START, buf, 2U) != EEPROM_OK) return 0U;
++    gj.GJ_1435_Ad=Get16(buf);
++    if (AT24C512_ReadBuffer(GJ_1470_AD_START, buf, 2U) != EEPROM_OK) return 0U;
++    gj.GJ_1470_Ad=Get16(buf);
++    gj_ok=ValidGJ(&gj);
++
++    if (AT24C512_ReadBuffer(CZ_AD_START, buf, 2U) != EEPROM_OK) return 0U;
++    ch.CZ_Ad=Get16(buf);
++    if (AT24C512_ReadBuffer(HB_AD_START, buf, 2U) != EEPROM_OK) return 0U;
++    ch.HB_Ad=Get16(buf);
++    ch_ok=ValidCH(&ch);
++
++    /* A marker or multiple independent, plausible fields can indicate
++     * legacy content. Unmarked random bytes must not be loaded. */
++    if (flag == 0xAAU ||
++        (pw_ok && (cg_ok || gj_ok || ch_ok)) ||
++        (cg_ok && gj_ok))
++    {
++        *found = 1U;
++        if (pw_ok) Driver_Calibration_Password=candidate_password;
++        else legacy_warning_mask |= EEP_LEGACY_BAD_PASSWORD;
++        if (cg_ok) CG_Param=cg;
++        else legacy_warning_mask |= EEP_LEGACY_BAD_CG;
++        if (gj_ok) GJ_Param=gj;
++        else legacy_warning_mask |= EEP_LEGACY_BAD_GJ;
++        if (ch_ok) CH_Param=ch;
++        else legacy_warning_mask |= EEP_LEGACY_BAD_CH;
++        /* [B3] Preserve compiled/default temperatures until an operator
++         * verifies/recalibrates. No automatic EEPROM migration occurs. */
++        legacy_warning_mask |= EEP_LEGACY_TEMP_UNCERTAIN;
++    }
++    return 1U;
++}
+ 
+ uint8_t Eep_Data_Get(void)
+ {
+-    uint8_t temp = 0;
+-    uint16_t temp_16 = 0;
+-    uint32_t temp_32 = 0;
+-    AT24C512_ReadByte(EEP_USE_FLAG_SIZE, &temp);
+-    if(temp == 0xFF)
+-    {
+-        //存储使用标志
+-        temp = 0xAA;
+-        AT24C512_WriteByte(EEP_USE_FLAG_START, temp);
+-        //存储默认标定密码
+-        temp = (Driver_Calibration_Password>>24)&0xFF;
+-        AT24C512_WriteByte(EEP_PASSWORD_START, temp);
+-        temp = (Driver_Calibration_Password>>16)&0xFF;
+-        AT24C512_WriteByte(EEP_PASSWORD_START+1, temp);
+-        temp = (Driver_Calibration_Password>>8)&0xFF;
+-        AT24C512_WriteByte(EEP_PASSWORD_START+2, temp);
+-        temp = (Driver_Calibration_Password)&0xFF;
+-        AT24C512_WriteByte(EEP_PASSWORD_START+3, temp);
+-        //存储超高标定默认参数：左股180AD 左股0AD 右股0AD 右股180AD 温度
+-        //超高左股180
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Max_Left_Ad)>>8)&0xFF;
+-        AT24C512_WriteByte(CG_LEFT_180_START, temp);
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Max_Left_Ad))&0xFF;
+-        AT24C512_WriteByte(CG_LEFT_180_START+1, temp);
+-        //超高左股0
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Zero_Left_Ad)>>8)&0xFF;
+-        AT24C512_WriteByte(CG_LEFT_0_START, temp);
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Zero_Left_Ad))&0xFF;
+-        AT24C512_WriteByte(CG_LEFT_0_START+1, temp);
+-        //超高右股180
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Max_Right_Ad)>>8)&0xFF;
+-        AT24C512_WriteByte(CG_RIGHT_180_START, temp);
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Max_Right_Ad))&0xFF;
+-        AT24C512_WriteByte(CG_RIGHT_180_START+1, temp);
+-        //超高右股0
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Zero_Right_Ad)>>8)&0xFF;
+-        AT24C512_WriteByte(CG_RIGHT_0_START, temp);
+-        temp = (Signed_Six_To_Unsigned_Six(CG_Param.CG_Zero_Right_Ad))&0xFF;
+-        AT24C512_WriteByte(CG_RIGHT_0_START+1, temp);
+-        //超高标定温度
+-        temp = (Float_To_Unsigned_Six(CG_Param.temp)>>24)&0xFF;
+-        AT24C512_WriteByte(CG_Temperature_START, temp);
+-        temp = (Float_To_Unsigned_Six(CG_Param.temp)>>16)&0xFF;
+-        AT24C512_WriteByte(CG_Temperature_START+1, temp);
+-        temp = (Float_To_Unsigned_Six(CG_Param.temp)>>8)&0xFF;
+-        AT24C512_WriteByte(CG_Temperature_START+3, temp);
+-        temp = (Float_To_Unsigned_Six(CG_Param.temp))&0xFF;
+-        AT24C512_WriteByte(CG_Temperature_START+4, temp);
+-        //存储轨距标定默认参数：1420轨距   1435轨距   1470轨距   温度
+-        //1420轨距
+-        temp = (GJ_Param.GJ_1410_Ad>>8)&0xFF;
+-        AT24C512_WriteByte(GJ_1410_AD_START, temp);
+-        temp = (GJ_Param.GJ_1410_Ad)&0xFF;
+-        AT24C512_WriteByte(GJ_1410_AD_START+1, temp);
+-        //1435轨距
+-        temp = (GJ_Param.GJ_1435_Ad>>8)&0xFF;
+-        AT24C512_WriteByte(GJ_1435_AD_START, temp);
+-        temp = (GJ_Param.GJ_1435_Ad)&0xFF;
+-        AT24C512_WriteByte(GJ_1435_AD_START+1, temp);
+-        //1470轨距
+-        temp = (GJ_Param.GJ_1470_Ad>>8)&0xFF;
+-        AT24C512_WriteByte(GJ_1470_AD_START, temp);
+-        temp = (GJ_Param.GJ_1470_Ad)&0xFF;
+-        AT24C512_WriteByte(GJ_1470_AD_START+1, temp);
+-        //轨距标定温度
+-        temp = (Float_To_Unsigned_Six(GJ_Param.temp)>>24)&0xFF;
+-        AT24C512_WriteByte(GJ_Temperature_START, temp);
+-        temp = (Float_To_Unsigned_Six(GJ_Param.temp)>>16)&0xFF;
+-        AT24C512_WriteByte(GJ_Temperature_START+1, temp);
+-        temp = (Float_To_Unsigned_Six(GJ_Param.temp)>>8)&0xFF;
+-        AT24C512_WriteByte(GJ_Temperature_START+3, temp);
+-        temp = (Float_To_Unsigned_Six(GJ_Param.temp))&0xFF;
+-        AT24C512_WriteByte(GJ_Temperature_START+4, temp);
+-        //存储查护标定默认参数：查照参数  护背参数  标定温度
+-        //查照参数
+-        temp = (CH_Param.CZ_Ad>>8)&0xFF;
+-        AT24C512_WriteByte(CZ_AD_START, temp);
+-        temp = (CH_Param.CZ_Ad)&0xFF;
+-        AT24C512_WriteByte(CZ_AD_START+1, temp);
+-        //护背参数
+-        temp = (CH_Param.HB_Ad>>8)&0xFF;
+-        AT24C512_WriteByte(HB_AD_START, temp);
+-        temp = (CH_Param.HB_Ad)&0xFF;
+-        AT24C512_WriteByte(HB_AD_START+1, temp);
+-        //标定温度AT24C512_WriteByte
+-        temp = (Float_To_Unsigned_Six(CH_Param.temp)>>24)&0xFF;
+-        AT24C512_WriteByte(CH_Temperature_START, temp);
+-        temp = (Float_To_Unsigned_Six(CH_Param.temp)>>16)&0xFF;
+-        AT24C512_WriteByte(CH_Temperature_START+1, temp);
+-        temp = (Float_To_Unsigned_Six(CH_Param.temp)>>8)&0xFF;
+-        AT24C512_WriteByte(CH_Temperature_START+3, temp);
+-        temp = (Float_To_Unsigned_Six(CH_Param.temp))&0xFF;
+-        AT24C512_WriteByte(CH_Temperature_START+4, temp);
+-        return 1;
+-    }
+-    //非第一次上电使用，存储基础参数
+-    
+-    //读取标定密码
+-    Driver_Calibration_Password = 0;
+-    AT24C512_ReadByte(EEP_PASSWORD_START, &temp);
+-    Driver_Calibration_Password = (temp<<24)&0xFF000000;
+-    AT24C512_ReadByte(EEP_PASSWORD_START+1, &temp);
+-    Driver_Calibration_Password += (temp<<16)&0x00FF0000;
+-    AT24C512_ReadByte(EEP_PASSWORD_START+2, &temp);
+-    Driver_Calibration_Password += (temp<<8)&0x0000FF00;
+-    AT24C512_ReadByte(EEP_PASSWORD_START+3, &temp);
+-    Driver_Calibration_Password += (temp)&0x000000FF;
+-    //读取超高标定默认参数：左股180AD 左股0AD 右股0AD 右股180AD 温度
+-    //超高左股180
+-    AT24C512_ReadByte(CG_LEFT_180_START, &temp);
+-    temp_16 = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(CG_LEFT_180_START+1, &temp);
+-    temp_16 += (temp)&0x00FF;
+-    CG_Param.CG_Max_Left_Ad = (Unsigned_Six_To_Signed_Six(temp_16));
+-    //超高左股0
+-    AT24C512_ReadByte(CG_LEFT_0_START, &temp);
+-    temp_16 = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(CG_LEFT_0_START+1, &temp);
+-    temp_16 += (temp)&0x00FF;
+-    CG_Param.CG_Zero_Left_Ad = (Unsigned_Six_To_Signed_Six(temp_16));
+-    //超高右股180
+-    AT24C512_ReadByte(CG_RIGHT_180_START, &temp);
+-    temp_16 = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(CG_RIGHT_180_START+1, &temp);
+-    temp_16 += (temp)&0x00FF;
+-    CG_Param.CG_Max_Right_Ad = (Unsigned_Six_To_Signed_Six(temp_16));
+-    //超高右股0
+-    AT24C512_ReadByte(CG_RIGHT_0_START, &temp);
+-    temp_16 = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(CG_RIGHT_0_START+1, &temp);
+-    temp_16 += (temp)&0x00FF;
+-    CG_Param.CG_Zero_Right_Ad = (Unsigned_Six_To_Signed_Six(temp_16));
+-    //超高标定温度
+-    AT24C512_ReadByte(CG_Temperature_START,   &temp);
+-    temp_32 = (temp<<24)&0xFF000000;
+-    AT24C512_ReadByte(CG_Temperature_START+1, &temp);
+-    temp_32 += (temp<<16)&0x00FF0000;
+-    AT24C512_ReadByte(CG_Temperature_START+3, &temp);
+-    temp_32 += (temp<<8)&0x0000FF00;
+-    AT24C512_ReadByte(CG_Temperature_START+4, &temp);
+-    temp_32 += (temp)&0x000000FF;
+-    CG_Param.temp = Unsigned_Six_To_Float(temp_32);
+-    
+-    
+-    //读取轨距标定默认参数：1410轨距   1435轨距   1470轨距   温度
+-    //1420轨距
+-    AT24C512_ReadByte(GJ_1410_AD_START, &temp);
+-    GJ_Param.GJ_1410_Ad = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(GJ_1410_AD_START+1, &temp);
+-    GJ_Param.GJ_1410_Ad += (temp)&0x00FF;
+-    //1435轨距
+-    AT24C512_ReadByte(GJ_1435_AD_START, &temp);
+-    GJ_Param.GJ_1435_Ad = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(GJ_1435_AD_START+1, &temp);
+-    GJ_Param.GJ_1435_Ad += (temp)&0xFF00;
+-    //1470轨距
+-    AT24C512_ReadByte(GJ_1470_AD_START, &temp);
+-    GJ_Param.GJ_1470_Ad = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(GJ_1470_AD_START+1, &temp);
+-    GJ_Param.GJ_1470_Ad += (temp)&0xFF00;
+-    //轨距标定温度
+-    AT24C512_ReadByte(GJ_Temperature_START, &temp);
+-    temp_32 = (temp<<24)&0xFF000000;
+-    AT24C512_ReadByte(GJ_Temperature_START+1, &temp);
+-    temp_32 += (temp<<16)&0x00FF0000;
+-    AT24C512_ReadByte(GJ_Temperature_START+3, &temp);
+-    temp_32 += (temp<<8)&0x0000FF00;
+-    AT24C512_ReadByte(GJ_Temperature_START+4, &temp);
+-    temp_32 += (temp)&0x000000FF;
+-    GJ_Param.temp = Unsigned_Six_To_Float(temp_32);
+-    
+-    //读取查护标定默认参数：查照参数  护背参数  标定温度
+-    
+-    //查照参数
+-    AT24C512_ReadByte(CZ_AD_START, &temp);
+-    CH_Param.CZ_Ad = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(CZ_AD_START+1, &temp);
+-    CH_Param.CZ_Ad += (temp)&0xFF00;
+-    //护背参数
+-    AT24C512_ReadByte(HB_AD_SIZE, &temp);
+-    CH_Param.HB_Ad = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(HB_AD_SIZE+1, &temp);
+-    CH_Param.HB_Ad += (temp)&0xFF00;
+-    //标定温度
+-    AT24C512_ReadByte(CH_Temperature_START, &temp);
+-    temp_32 = (temp<<24)&0xFF000000;
+-    AT24C512_ReadByte(CH_Temperature_START+1, &temp);
+-    temp_32 += (temp<<16)&0x00FF0000;
+-    AT24C512_ReadByte(CH_Temperature_START+3, &temp);
+-    temp_32 += (temp<<8)&0x0000FF00;
+-    AT24C512_ReadByte(CH_Temperature_START+4, &temp);
+-    temp_32 += (temp)&0x000000FF;
+-    CH_Param.temp = Unsigned_Six_To_Float(temp_32);
+-    
+-    
+-    return 0;
+-}
+-
+-uint8_t Eep_Write_For_Signed16(uint16_t addr,int16_t data)
+-{
+-    uint8_t temp;
+-    temp = (Signed_Six_To_Unsigned_Six(data)>>8)&0xFF;
+-    if(AT24C512_WriteByte(addr, temp) != EEPROM_OK)
+-        return 0;
+-    temp =  Signed_Six_To_Unsigned_Six(data)&0xFF;
+-    if(AT24C512_WriteByte(addr+1, temp) != EEPROM_OK)
+-        return 0;
+-    return 1;
+-}
+-uint8_t Eep_Write_For_Unsigned16(uint16_t addr,uint16_t data)
+-{
+-    uint8_t temp;
+-    temp = (data>>8)&0xFF;
+-    if(AT24C512_WriteByte(addr, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (data)&0xFF;
+-    if(AT24C512_WriteByte(addr+1, temp) != EEPROM_OK)
+-        return 0;
+-    return 1;
+-}
+-uint8_t Eep_Write_For_Float(uint16_t addr,float data)
+-{
+-    uint8_t temp;
+-    temp = (Float_To_Unsigned_Six(data)>>24)&0xFF;
+-    if(AT24C512_WriteByte(addr, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (Float_To_Unsigned_Six(data)>>16)&0xFF;
+-    if(AT24C512_WriteByte(addr+1, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (Float_To_Unsigned_Six(data)>>8)&0xFF;
+-    if(AT24C512_WriteByte(addr+2, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (Float_To_Unsigned_Six(data))&0xFF;
+-    if(AT24C512_WriteByte(addr+3, temp) != EEPROM_OK)
+-        return 0;
+-    return 1;
+-}
+-
+-uint8_t Eep_Write_For_Unsigned32(uint16_t addr,uint32_t data)
+-{
+-    uint8_t temp;
+-    temp = (data>>24)&0xFF;
+-    if(AT24C512_WriteByte(addr, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (data>>16)&0xFF;
+-    if(AT24C512_WriteByte(addr+1, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (data>>8)&0xFF;
+-    if(AT24C512_WriteByte(addr+2, temp) != EEPROM_OK)
+-        return 0;
+-    temp = (data)&0xFF;
+-    if(AT24C512_WriteByte(addr+3, temp) != EEPROM_OK)
+-        return 0;
+-    return 1;
+-}
+-
+-EEP_NODE Eep_Node_Str = {25,12,13,12,15,31,0,0x123456,0x223344};
+-uint8_t Eep_Input_Node(uint16_t index,EEP_NODE Eep_Node_Str)
+-{
+-    uint8_t temp;
+-    uint8_t  EepBuffer[sizeof(EEP_NODE)];
+-    uint16_t eep_index = 0,eep_number;
+-    uint16_t eep_addr = 0;
+-    //获取索引位置
+-    AT24C512_ReadByte(NODE_INDEX_ADDR_START,&temp);
+-    eep_index = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INDEX_ADDR_START+1,&temp);
+-    eep_index += temp&0x00FF;
+-    //获取数据个数
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+-    eep_number = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    eep_number += temp&0x00FF;
+-    //判断
+-    if(eep_number == MAX_INDEX_ADDR)//存储已满
+-        return 1;
+-    //获取真实地址
+-    eep_addr = eep_index*sizeof(EEP_NODE);
+-    //写入数据
+-    memcpy(EepBuffer, &Eep_Node_Str, sizeof(Eep_Node_Str));
+-    AT24C512_WriteBuffer(eep_addr,EepBuffer,sizeof(Eep_Node_Str));
+-    //修改索引位置
+-    eep_index ++;
+-    temp = (eep_index>>8)&0xFF;
+-    AT24C512_WriteByte(NODE_INDEX_ADDR_START,temp);
+-    temp = eep_index&0xFF;
+-    AT24C512_WriteByte(NODE_INDEX_ADDR_START+1,temp);
+-    //修改数据个数
+-    eep_number ++;
+-    temp = (eep_number>>8)&0xFF;
+-    AT24C512_WriteByte(NODE_INPUT_NUM_ADDR_START,temp);
+-    temp = eep_number&0xFF;
+-    AT24C512_WriteByte(NODE_INPUT_NUM_ADDR_START+1,temp);
+-    return 0;
+-}
+-
+-uint8_t Eep_Output_Node(uint16_t index,void*Eep_Node_Str)
+-{
+-    uint8_t temp;
+-    uint8_t  eep_buff[sizeof(EEP_NODE)] = {0};
+-    uint16_t eep_index = 0,eep_number;
+-    uint16_t eep_addr = 0;
+-    //获取索引位置
+-    AT24C512_ReadByte(NODE_INDEX_ADDR_START,&temp);
+-    eep_index = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INDEX_ADDR_START+1,&temp);
+-    eep_index += temp&0x00FF;
+-    //获取数据个数
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+-    eep_number = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    eep_number += temp&0x00FF;
+-    //判断是否有该索引
+-    if(eep_number == 0)//数据为空
+-        return 1;
+-    if(index>eep_index)//没有该索引
+-        return 2;
+-    //获取真是存储地址
+-    eep_addr = index*sizeof(EEP_NODE);
+-    //读数据
+-    AT24C512_ReadBuffer(eep_addr,eep_buff,sizeof(EEP_NODE));
+-    //数组转结构体
+-    memcpy(Eep_Node_Str, eep_buff ,sizeof(EEP_NODE));
+-    
+-    return 0;
++    uint8_t cal_slot[EEP_B3_SLOT_LEN];
++    uint8_t rec_slot[EEP_B3_SLOT_LEN];
++    uint8_t result, legacy_found = 0U;
++    B3_CAL_DATA decoded;
++
++    cal_state=EEP_STATE_IO_ERROR;
++    record_state=EEP_RECORD_IO_ERROR;
++    cal_active_slot=-1;
++    record_active_slot=-1;
++    cal_sequence=0U;
++    record_sequence=0U;
++    record_count=0U;
++    legacy_upgrade_approved=0U;
++    legacy_record_import_approved=0U;
++    legacy_warning_mask=0U;
++
++    /* [B3] Absolutely no EEPROM write on boot, including probe. */
++    if (AT24C512_Init() != EEPROM_OK) return 0U;
++
++    result=B3_FindSlot(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
++                       cal_slot, &cal_active_slot, &cal_sequence);
++    if (result == 3U) return 0U;
++    if (result == 1U)
++    {
++        B3_ReadCal(cal_slot, &decoded);
++        B3_CalibrationToGlobals(&decoded);
++        cal_state=EEP_STATE_B3_VALID;
++    }
++    else if (result == 2U)
++    {
++        /* [B3] Never auto-initialize over an invalid previous journal. */
++        cal_state=EEP_STATE_B3_CORRUPT;
++    }
++    else
++    {
++        if (!B3_LoadLegacy(&legacy_found)) return 0U;
++        cal_state=legacy_found ? EEP_STATE_LEGACY_LOCKED :
++                               EEP_STATE_FACTORY_EMPTY;
++    }
++
++    result=B3_FindSlot(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
++                       rec_slot, &record_active_slot, &record_sequence);
++    if (result == 3U) { record_state=EEP_RECORD_IO_ERROR; return 0U; }
++    if (result == 1U)
++    {
++        record_count=Get16(rec_slot+10);
++        record_state=EEP_RECORD_B3_VALID;
++    }
++    else if (result == 2U) record_state=EEP_RECORD_CORRUPT;
++    else record_state=EEP_RECORD_EMPTY;
++
++    return (cal_state != EEP_STATE_B3_CORRUPT &&
++            record_state != EEP_RECORD_CORRUPT) ? 1U : 0U;
++}
++
++EEP_STORAGE_STATE Eep_Get_Storage_State(void) { return cal_state; }
++EEP_RECORD_STATE Eep_Get_Record_State(void) { return record_state; }
++uint8_t Eep_Get_Legacy_Warnings(void) { return legacy_warning_mask; }
++
++uint8_t Eep_Approve_Legacy_Calibration_Upgrade(void)
++{
++    /* Must be explicitly invoked after an external 64KiB backup,
++     * review of GJ/CG/CH calibration and operator authorization.
++     * This does NOT modify EEPROM and is reset after reboot/save. */
++    if (cal_state != EEP_STATE_LEGACY_LOCKED) return 0U;
++    legacy_upgrade_approved=1U;
++    return 1U;
++}
++
++uint8_t Eep_Approve_Legacy_Record_Import(void)
++{
++    /* [B3] Independent authorization for importing historical records.
++     * Allowed after a full external backup and independently VERIFIED
++     * record count, even if calibration was upgraded earlier. */
++    if (record_state != EEP_RECORD_EMPTY ||
++        cal_state == EEP_STATE_IO_ERROR ||
++        cal_state == EEP_STATE_NOT_READY ||
++        cal_state == EEP_STATE_B3_CORRUPT) return 0U;
++    legacy_record_import_approved=1U;
++    return 1U;
++}
++
++uint8_t Eep_Save_CG_Calibration(CG_Calibration_Param_Str data)
++{
++    B3_CAL_DATA staged;
++    B3_CalibrationFromGlobals(&staged);
++    staged.cg=data;
++    return B3_SaveCalibration(&staged);
++}
++
++uint8_t Eep_Save_GJ_Calibration(GJ_Calibration_Param_Str data)
++{
++    B3_CAL_DATA staged;
++    B3_CalibrationFromGlobals(&staged);
++    staged.gj=data;
++    return B3_SaveCalibration(&staged);
++}
++
++uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str data)
++{
++    B3_CAL_DATA staged;
++    B3_CalibrationFromGlobals(&staged);
++    staged.ch=data;
++    return B3_SaveCalibration(&staged);
++}
++
++uint8_t Eep_Save_Password(uint32_t password)
++{
++    B3_CAL_DATA staged;
++    B3_CalibrationFromGlobals(&staged);
++    staged.password=password;
++    return B3_SaveCalibration(&staged);
++}
++
++/* [B3] Deprecated unsafe individual-parameter interfaces are
++ * deliberately blocked; a calibration group must commit together. */
++uint8_t Eep_Write_For_Signed16(uint16_t addr, int16_t data)
++{
++    (void)addr; (void)data;
++    return 0U;
++}
++uint8_t Eep_Write_For_Unsigned16(uint16_t addr, uint16_t data)
++{
++    (void)addr; (void)data;
++    return 0U;
++}
++uint8_t Eep_Write_For_Float(uint16_t addr, float data)
++{
++    (void)addr; (void)data;
++    return 0U;
++}
++uint8_t Eep_Write_For_Unsigned32(uint16_t addr, uint32_t data)
++{
++    return (addr == EEP_PASSWORD_START) ? Eep_Save_Password(data) : 0U;
++}
++
++static uint8_t B3_SaveRecordCount(uint16_t count)
++{
++    uint8_t buf[EEP_B3_SLOT_LEN];
++    if (count > MAX_INDEX_ADDR || record_state == EEP_RECORD_CORRUPT ||
++        record_state == EEP_RECORD_IO_ERROR ||
++        record_state == EEP_RECORD_NOT_READY) return 0U;
++    B3_MakeRecordMeta(buf, count, record_sequence + 1U);
++    if (!B3_Commit(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
++                   buf, &record_active_slot, &record_sequence)) return 0U;
++    record_count=count;
++    record_state=EEP_RECORD_B3_VALID;
++    return 1U;
++}
++
++uint8_t Eep_Get_Node_Count(uint16_t *count)
++{
++    if (count == NULL || record_state == EEP_RECORD_CORRUPT ||
++        record_state == EEP_RECORD_IO_ERROR ||
++        record_state == EEP_RECORD_NOT_READY) return 0U;
++    *count=record_count;
++    return 1U;
++}
++
++/* The 15-byte STM32 record payload is deliberately stored exactly as
++ * the existing UART2 protocol transmits it: 7 8-bit fields followed
++ * by two little-endian uint32_t measurement words. */
++static void EncodeNode(uint8_t out[EEP_NODE_ENCODED_LEN], const EEP_NODE *n)
++{
++    out[0]=n->year; out[1]=n->month; out[2]=n->day;
++    out[3]=n->hour; out[4]=n->min; out[5]=n->sec; out[6]=n->type;
++    out[7]=(uint8_t)n->data1;
++    out[8]=(uint8_t)(n->data1 >> 8);
++    out[9]=(uint8_t)(n->data1 >> 16);
++    out[10]=(uint8_t)(n->data1 >> 24);
++    out[11]=(uint8_t)n->data2;
++    out[12]=(uint8_t)(n->data2 >> 8);
++    out[13]=(uint8_t)(n->data2 >> 16);
++    out[14]=(uint8_t)(n->data2 >> 24);
++}
++
++static void DecodeNode(EEP_NODE *n, const uint8_t in[EEP_NODE_ENCODED_LEN])
++{
++    n->year=in[0]; n->month=in[1]; n->day=in[2];
++    n->hour=in[3]; n->min=in[4]; n->sec=in[5]; n->type=in[6];
++    n->data1=(uint32_t)in[7] | ((uint32_t)in[8]<<8) |
++             ((uint32_t)in[9]<<16) | ((uint32_t)in[10]<<24);
++    n->data2=(uint32_t)in[11] | ((uint32_t)in[12]<<8) |
++             ((uint32_t)in[13]<<16) | ((uint32_t)in[14]<<24);
++}
++
++static uint8_t B3_WriteRecord(uint16_t index, const uint8_t *raw)
++{
++    uint8_t verify[EEP_NODE_ENCODED_LEN];
++    uint16_t addr;
++    if (index >= MAX_INDEX_ADDR) return 0U;
++    addr=(uint16_t)(EEP_B3_RECORD_START +
++                    (uint32_t)index*EEP_NODE_ENCODED_LEN);
++    if (AT24C512_WriteBuffer(addr, (uint8_t *)raw, EEP_NODE_ENCODED_LEN)
++        != EEPROM_OK) return 0U;
++    if (AT24C512_ReadBuffer(addr, verify, EEP_NODE_ENCODED_LEN)
++        != EEPROM_OK) return 0U;
++    return (memcmp(raw, verify, EEP_NODE_ENCODED_LEN) == 0) ? 1U : 0U;
++}
++
++uint8_t Eep_Input_Node(uint16_t index, EEP_NODE node)
++{
++    uint8_t raw[EEP_NODE_ENCODED_LEN];
++    if (record_state == EEP_RECORD_CORRUPT ||
++        record_state == EEP_RECORD_IO_ERROR ||
++        record_state == EEP_RECORD_NOT_READY) return 3U;
++    if (record_count >= MAX_INDEX_ADDR) return 1U;
++    if (index != record_count) return 2U;
++    EncodeNode(raw, &node);
++    if (!B3_WriteRecord(index, raw)) return 3U;
++    /* [B3] Metadata is committed LAST. Power loss before this line
++     * leaves an unreferenced record, never an inflated record count. */
++    if (!B3_SaveRecordCount((uint16_t)(record_count+1U))) return 3U;
++    return 0U;
++}
++
++uint8_t Eep_Output_Node(uint16_t index, void *node)
++{
++    EEP_NODE decoded;
++    uint8_t raw[EEP_NODE_ENCODED_LEN];
++    uint16_t addr;
++    if (node == NULL || record_state == EEP_RECORD_CORRUPT ||
++        record_state == EEP_RECORD_IO_ERROR ||
++        record_state == EEP_RECORD_NOT_READY) return 3U;
++    if (record_count == 0U) return 1U;
++    if (index >= record_count || index >= MAX_INDEX_ADDR) return 2U;
++    addr=(uint16_t)(EEP_B3_RECORD_START +
++                    (uint32_t)index*EEP_NODE_ENCODED_LEN);
++    if (AT24C512_ReadBuffer(addr, raw, EEP_NODE_ENCODED_LEN)
++        != EEPROM_OK) return 3U;
++    DecodeNode(&decoded, raw);
++    memcpy(node, &decoded, sizeof(decoded));
++    return 0U;
+ }
+ 
+ uint8_t Eep_Clear_Node(void)
+ {
+-    uint8_t temp = 0;
+-    if(AT24C512_WriteByte(NODE_INDEX_ADDR_START,temp) != EEPROM_OK)
+-        return 0;
+-    if(AT24C512_WriteByte(NODE_INDEX_ADDR_START+1,temp) != EEPROM_OK)
+-        return 0;
+-    if(AT24C512_WriteByte(NODE_INPUT_NUM_ADDR_START,temp) != EEPROM_OK)
+-        return 0;
+-    if(AT24C512_WriteByte(NODE_INPUT_NUM_ADDR_START+1,temp) != EEPROM_OK)
+-        return 0;
+-    return 1;
+-}
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-EEP_NODE Input_eep_node,Output_eep_node;
+-uint8_t  eep_buff[sizeof(EEP_NODE)] = {0};
+-void Test(void)
+-{
+-    uint8_t res = 0;
+-    Input_eep_node.year  = 0x00;
+-    Input_eep_node.month = 0x11;
+-    Input_eep_node.day   = 0x22;
+-    Input_eep_node.hour  = 0x33;
+-    Input_eep_node.min   = 0x44;
+-    Input_eep_node.sec   = 0x55;
+-    Input_eep_node.type  = 0x66;
+-    Input_eep_node.data1 = 0x778899AA;
+-    Input_eep_node.data2 = 0xBBCCDDEE;
+-    
+-    Eep_Clear_Node();
+-    Eep_Input_Node(0,Input_eep_node);
+-    Eep_Output_Node(0,&Output_eep_node);
+-    Input_eep_node.data2 = 0x89ABCDEF;
+-}
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
++    /* [B3] Logical clear only. Old records and B3 record payload bytes
++     * remain physically present; only the CRC-checked count is reset. */
++    return B3_SaveRecordCount(0U);
++}
++
++uint8_t Eep_Read_Legacy_Record(uint16_t index, void *node)
++{
++    EEP_NODE decoded;
++    uint8_t raw[EEP_NODE_ENCODED_LEN];
++    uint16_t old_addr;
++    if (node == NULL || index >= MAX_INDEX_ADDR) return 0U;
++    old_addr=(uint16_t)((uint32_t)index*EEP_NODE_ENCODED_LEN);
++    if (AT24C512_ReadBuffer(old_addr, raw, EEP_NODE_ENCODED_LEN)
++        != EEPROM_OK) return 0U;
++    DecodeNode(&decoded, raw);
++    memcpy(node, &decoded, sizeof(decoded));
++    return 1U;
++}
++
++uint8_t Eep_Import_Legacy_Records(uint16_t verified_count)
++{
++    uint16_t i, old_addr;
++    uint8_t raw[EEP_NODE_ENCODED_LEN], all_ff;
++    uint8_t j;
++    /* [B3] Service-only, requires operator backup and manual count.
++     * Will NEVER read/write the overlapping legacy node counters. */
++    if (!legacy_record_import_approved ||
++        record_state != EEP_RECORD_EMPTY ||
++        verified_count > MAX_INDEX_ADDR) return 0U;
++    for (i=0U; i<verified_count; ++i)
++    {
++        old_addr=(uint16_t)((uint32_t)i*EEP_NODE_ENCODED_LEN);
++        if (AT24C512_ReadBuffer(old_addr, raw, EEP_NODE_ENCODED_LEN)
++            != EEPROM_OK) return 0U;
++        all_ff=1U;
++        for (j=0U; j<EEP_NODE_ENCODED_LEN; ++j)
++            if (raw[j]!=0xFFU) {all_ff=0U; break;}
++        if (all_ff || !B3_WriteRecord(i, raw)) return 0U;
++    }
++    if (!B3_SaveRecordCount(verified_count)) return 0U;
++    legacy_record_import_approved=0U;
++    return 1U;
++}
+--- a/STM32L151/Software/src/App_key.c
++++ b/STM32L151/Software/src/App_key.c
+@@ -270,7 +270,8 @@
+                              Password_Input_Temp[3]*100+
+                              Password_Input_Temp[4]*10+
+                              Password_Input_Temp[5];
+-    if(Eep_Write_For_Unsigned32(EEP_PASSWORD_START,Password_Temp) == 1)
++    /* [B3] Commit the complete CRC-protected calibration/password snapshot. */
++    if(Eep_Save_Password(Password_Temp) == 1)
+         Beep_Ctrl(100,1);
+     else
+         Beep_Ctrl(100,3);
+@@ -317,28 +318,12 @@
+             CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad;
+             break;
+         case 9:
+-            if(Eep_Write_For_Signed16(CG_LEFT_180_START,CG_Param_Temp.CG_Max_Left_Ad)  == 0)
++            /* [B3] All five CG fields are written together to a new
++             * validated A/B snapshot, never to legacy overlapping bytes. */
++            CG_Param_Temp.temp = Temp;
++            if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
+             {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Signed16(CG_LEFT_0_START,CG_Param_Temp.CG_Zero_Left_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Signed16(CG_RIGHT_180_START,CG_Param_Temp.CG_Max_Right_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Signed16(CG_RIGHT_0_START,CG_Param_Temp.CG_Zero_Right_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Float(CG_Temperature_START,Temp) == 0)
+-            {
++                CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
+                 Beep_Ctrl(100,3);
+                 return;
+             }
+@@ -365,23 +350,11 @@
+             GJ_Param_Temp.GJ_1470_Ad   = GJ_Ad;
+             break;
+         case 7:
+-            if(Eep_Write_For_Unsigned16(GJ_1410_AD_START,GJ_Param_Temp.GJ_1410_Ad)  == 0)
++            /* [B3] One validated atomic-ish A/B update for GJ points. */
++            GJ_Param_Temp.temp = Temp;
++            if (Eep_Save_GJ_Calibration(GJ_Param_Temp) == 0)
+             {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Unsigned16(GJ_1435_AD_START,GJ_Param_Temp.GJ_1435_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Unsigned16(GJ_1470_AD_START,GJ_Param_Temp.GJ_1470_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Float(GJ_Temperature_START,Temp) == 0)
+-            {
++                GJ_Calibration_Status = 6;
+                 Beep_Ctrl(100,3);
+                 return;
+             }
+@@ -402,18 +375,11 @@
+             CH_Param_Temp.HB_Ad = GJ_Ad;
+             break;
+         case 5:
+-            if(Eep_Write_For_Unsigned16(CZ_AD_START,CH_Param_Temp.CZ_Ad)  == 0)
++            /* [B3] CH ADC/temperature now stored outside legacy node index. */
++            CH_Param_Temp.temp = Temp;
++            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
+             {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Unsigned16(HB_AD_START,CH_Param_Temp.HB_Ad) == 0)
+-            {
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            if(Eep_Write_For_Float(CH_Temperature_START,Temp) == 0)
+-            {
++                CH_Calibration_Status = 4;
+                 Beep_Ctrl(100,3);
+                 return;
+             }
+--- a/STM32L151/Software/src/agreement_code.c
++++ b/STM32L151/Software/src/agreement_code.c
+@@ -124,67 +124,62 @@
+     return 1;
+ }
+ 
+-uint8_t UART2_PC_Write_Password(AGREEMEN_PARAM * AgreementParam)
+-{
+-    uint8_t *buffer = AgreementParam->CmdBuffer+AgreementParam->DataOffset;
+-    AgreementParam->dataNumber = 0;
+-    if(AT24C512_WriteByte(EEP_PASSWORD_START,buffer[0]) == EEPROM_ERROR)
+-        return 0;
+-    if(AT24C512_WriteByte(EEP_PASSWORD_START+1,buffer[1]) == EEPROM_ERROR)
+-        return 0;
+-    if(AT24C512_WriteByte(EEP_PASSWORD_START+2,buffer[2]) == EEPROM_ERROR)
+-        return 0;
+-    if(AT24C512_WriteByte(EEP_PASSWORD_START+3,buffer[3]) == EEPROM_ERROR)
+-        return 0;
+-    return 1;
+-}
+-
+-uint8_t UART2_PC_Read_Eep(AGREEMEN_PARAM * AgreementParam)
+-{
+-    uint8_t  temp = 0;
+-    uint16_t Number = 0;
+-    uint16_t Index = 0;
+-    //参数传入数据不对
+-    if(AgreementParam->dataNumber != 2)
+-        return 0;
+-    //根据协议获取参数
+-    Index = (AgreementParam->CmdBuffer[AgreementParam->DataOffset]<<8)+AgreementParam->CmdBuffer[AgreementParam->DataOffset+1];
+-    //获取存储器节点个数
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+-    Number = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    Number += temp&0x00FF;
+-    //判断参数是否合法
+-    if(Index >= Number || Index >= MAX_INDEX_ADDR)
+-        return 0; /* [B2] 0-based records; reject untrusted indexes. */
+-    //读取数据并存入节点中
+-    /* [B2] Echo the two-byte record index, then append the 15-byte node. */
++uint8_t UART2_PC_Write_Password(AGREEMEN_PARAM *AgreementParam)
++{
++    uint8_t *buffer = AgreementParam->CmdBuffer + AgreementParam->DataOffset;
++    uint32_t new_password;
++    /* [B3] No more four unverified byte writes to the legacy region.
++     * The password is committed with the whole calibration snapshot. */
++    new_password = ((uint32_t)buffer[0] << 24) |
++                   ((uint32_t)buffer[1] << 16) |
++                   ((uint32_t)buffer[2] << 8) | (uint32_t)buffer[3];
++    AgreementParam->dataNumber = 0U;
++    return Eep_Save_Password(new_password);
++}
++
++uint8_t UART2_PC_Read_Eep(AGREEMEN_PARAM *AgreementParam)
++{
++    uint16_t number = 0U, index;
++    if (AgreementParam->dataNumber != 2U) return 0U;
++    index = (uint16_t)(((uint16_t)AgreementParam->CmdBuffer[AgreementParam->DataOffset] << 8) |
++              AgreementParam->CmdBuffer[AgreementParam->DataOffset + 1U]);
++    /* [B3] NEVER read the legacy counter from 0xFFE1/0xFFE2:
++     * those bytes overlap the old CH calibration. */
++    if (!Eep_Get_Node_Count(&number) || index >= number ||
++        index >= MAX_INDEX_ADDR) return 0U;
+     if ((uint32_t)AgreementParam->DataOffset + 2U + sizeof(EEP_NODE) + 3U >
+-        AgreementParam->BufferSize) return 0;
+-    if (Eep_Output_Node(Index, AgreementParam->CmdBuffer+
+-            AgreementParam->DataOffset+2U) != 0)
+-        return 0; /* [B2] Reject unreadable record. */
+-    //更改数据量
++        AgreementParam->BufferSize) return 0U;
++    if (Eep_Output_Node(index, AgreementParam->CmdBuffer +
++          AgreementParam->DataOffset + 2U) != 0U) return 0U;
+     AgreementParam->dataNumber += sizeof(EEP_NODE);
+-    return 1;
+-}
+-
+-uint8_t UART2_PC_Clear_Eep(AGREEMEN_PARAM * AgreementParam)
+-{
+-    /* [B2] Not implemented until the EEPROM address layout is repaired. */
++    return 1U;
++}
++
++/* [B3] UART2 has no authentication for destructive commands.
++ * The local Eep_Clear_Node() API is functional, but remote clear remains
++ * disabled by default. Enable only after an authentication design review. */
++#ifndef EEPROM_UART2_ENABLE_CLEAR
++#define EEPROM_UART2_ENABLE_CLEAR 0
++#endif
++uint8_t UART2_PC_Clear_Eep(AGREEMEN_PARAM *AgreementParam)
++{
+     (void)AgreementParam;
+-    return 0;
+-}
+-
+-uint8_t UART2_PC_Get_Eep_Number(AGREEMEN_PARAM * AgreementParam)
+-{
+-    uint8_t  temp = 0;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+-    AgreementParam->CmdBuffer[AgreementParam->DataOffset] = temp;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    AgreementParam->CmdBuffer[AgreementParam->DataOffset+1] = temp;
+-    AgreementParam->dataNumber = 2;
+-    return 1;
++#if EEPROM_UART2_ENABLE_CLEAR
++    return Eep_Clear_Node();
++#else
++    return 0U;
++#endif
++}
++
++uint8_t UART2_PC_Get_Eep_Number(AGREEMEN_PARAM *AgreementParam)
++{
++    uint16_t count;
++    /* [B3] B3's CRC-protected journal is the sole source of the count. */
++    if (!Eep_Get_Node_Count(&count)) return 0U;
++    AgreementParam->CmdBuffer[AgreementParam->DataOffset] = (uint8_t)(count >> 8);
++    AgreementParam->CmdBuffer[AgreementParam->DataOffset + 1U] = (uint8_t)count;
++    AgreementParam->dataNumber = 2U;
++    return 1U;
+ }
+ uint8_t UART2_PC_Change_Data_Mode(AGREEMEN_PARAM * AgreementParam)
+ {
+@@ -200,15 +195,10 @@
+ }
+ uint8_t UART2_PC_Get_All_Eep(AGREEMEN_PARAM * AgreementParam)
+ {
+-    uint8_t  temp = 0;
+     uint16_t number = 0, size;
+     uint32_t sum = 0;
+-    //获取节点个数
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+-    number = (temp<<8)&0xFF00;
+-    AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    number |= (uint16_t)(temp & 0x00FF); /* [B2] Keep high byte. */
+-    /* [B2] Guard corrupted EEPROM counters before potentially long TX. */
++    /* [B3] Only use validated B3 metadata, not the overlapped legacy count. */
++    if (!Eep_Get_Node_Count(&number)) return 0;
+     if (number > MAX_INDEX_ADDR ||
+         (uint32_t)number * sizeof(EEP_NODE) > 65535UL) return 0;
+     size = (uint16_t)((uint32_t)number * sizeof(EEP_NODE));
+@@ -364,13 +354,18 @@
+             }
+             break;
+         case UART2_PC_CLEAR_EEP_DATA_ACK:
+-            /* [B2] Existing clear command has no implementation; refuse
+-             * to report success. EEPROM layout is explicitly out of scope. */
+-            CmdParam.cmd |= (1U << 6);
++            /* [B3] Remote destructive clear is guarded by a disabled-by-
++             * default compile-time flag; no false success is reported. */
++            if (UART2_PC_Clear_Eep(&CmdParam) == 0)
++                CmdParam.cmd |= (1U << 6);
+             CmdParam.dataNumber = 0;
+             break;
+         case UART2_PC_GET_EEP_NUM_DATA_ACK:
+-            UART2_PC_Get_Eep_Number(&CmdParam);
++            if (UART2_PC_Get_Eep_Number(&CmdParam) == 0)
++            {
++                CmdParam.cmd |= (1U << 6);
++                CmdParam.dataNumber = 0;
++            }
+             break;
+         case UART2_PC_CHANGE_DATA_MODE_ACK:
+             if(UART2_PC_Change_Data_Mode(&CmdParam) == 0)
+--- a/STM32L151/Software/src/at21c512_code.c
++++ b/STM32L151/Software/src/at21c512_code.c
+@@ -1,259 +1,143 @@
+ #include "at24c512_head.h"
+-
++#include <string.h>
+ 
+ extern I2C_HandleTypeDef hi2c1;
+ 
++/* [B3] All I2C transfers use finite timeouts, never HAL_MAX_DELAY.
++ * AT24C512C supports 16-bit word addresses and 128-byte page writes.
++ * HAL_I2C_Mem_{Read,Write} use a repeated START for random reads.
++ */
++static uint8_t Eep_Map_Status(HAL_StatusTypeDef status)
++{
++    if (status == HAL_OK) return EEPROM_OK;
++    if (status == HAL_TIMEOUT) return EEPROM_TIMEOUT;
++    return EEPROM_ERROR;
++}
+ 
++static uint8_t Eep_Check_Range(uint16_t addr, uint16_t len)
++{
++    return ((uint32_t)addr + (uint32_t)len <= EEPROM_MAX_SIZE) ? 1U : 0U;
++}
+ 
++static uint8_t Eep_Wait_Write_Complete(void)
++{
++    uint8_t i;
++    /* [B3] ACK polling after STOP, not a blind fixed 5 ms sleep.
++     * Each attempt is bounded and we also bound the number of retries. */
++    for (i = 0; i < EEPROM_ACK_POLL_TRIES; ++i)
++    {
++        if (HAL_I2C_IsDeviceReady(&hi2c1, AT24C512_ADDR, 1U, 2U) == HAL_OK)
++            return EEPROM_OK;
++        HAL_Delay(1U);
++    }
++    return EEPROM_TIMEOUT;
++}
+ 
+-
+-
+-/**
+-  * @brief  初始化AT24C512
+-  * @retval 状态: 0-成功, 1-失败
+-  */
+ uint8_t AT24C512_Init(void)
+ {
+     return AT24C512_Check();
+ }
+ 
+-/**
+-  * @brief  单字节写入
+-  * @param  addr: 写入地址(0-65535)
+-  * @param  data: 要写入的数据
+-  * @retval 状态
+-  */
++uint8_t AT24C512_Check(void)
++{
++    /* [B3] OLD CODE WROTE 0x55 TO ADDRESS 0x0000, DESTROYING A RECORD.
++     * The probe is now strictly read-only. A successful probe does NOT
++     * demonstrate that WP is low; high-level writers read back data. */
++    return Eep_Map_Status(HAL_I2C_IsDeviceReady(&hi2c1,
++                      AT24C512_ADDR, 3U, EEPROM_IO_TIMEOUT_MS));
++}
++
+ uint8_t AT24C512_WriteByte(uint16_t addr, uint8_t data)
+ {
+-    HAL_StatusTypeDef status;
+-    uint8_t buffer[3];
+-    
+-    buffer[0] = (addr >> 8) & 0xFF;   // 地址高字节
+-    buffer[1] = addr & 0xFF;          // 地址低字节  
+-    buffer[2] = data;                 // 数据
+-    
+-    status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, buffer, 3, HAL_MAX_DELAY);
+-    
+-    if(status == HAL_OK)
+-    {
+-        AT24C512_Delay(5); // 等待写周期完成
+-        return EEPROM_OK;
+-    }
+-    return EEPROM_ERROR;
++    return AT24C512_WriteBuffer(addr, &data, 1U);
+ }
+ 
+-/**
+-  * @brief  单字节读取
+-  * @param  addr: 读取地址
+-  * @param  data: 读取的数据指针
+-  * @retval 状态
+-  */
+ uint8_t AT24C512_ReadByte(uint16_t addr, uint8_t *data)
+ {
+-    HAL_StatusTypeDef status;
+-    uint8_t addr_buffer[2];
+-    
+-    
+-    addr_buffer[0] = (addr >> 8) & 0xFF;
+-    addr_buffer[1] = addr & 0xFF;
+-    
+-    // 先发送读取地址
+-    status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, addr_buffer, 2, HAL_MAX_DELAY);
+-    if(status != HAL_OK) return EEPROM_ERROR;
+-    
+-    // 然后读取数据
+-    status = HAL_I2C_Master_Receive(&hi2c1, AT24C512_ADDR | 0x01, data, 1, HAL_MAX_DELAY);
+-    
+-    return (status == HAL_OK) ? EEPROM_OK : EEPROM_ERROR;
++    return AT24C512_ReadBuffer(addr, data, 1U);
+ }
+ 
+-/**
+-  * @brief  整页写入(128字节)
+-  * @param  page_num: 页号(0-511)
+-  * @param  data: 数据指针(必须128字节)
+-  * @retval 状态
+-  */
+ uint8_t AT24C512_WritePage(uint16_t page_num, uint8_t *data)
+ {
+-    HAL_StatusTypeDef status;
+-    uint16_t start_addr;
+-    uint8_t buffer[EEPROM_PAGE_SIZE + 2];
+-    
+-    if(page_num >= 512) return EEPROM_ERROR; // 512页×128字节=64KB
+-    
+-    start_addr = page_num * EEPROM_PAGE_SIZE;
+-    buffer[0] = (start_addr >> 8) & 0xFF;
+-    buffer[1] = start_addr & 0xFF;
+-    
+-    // 拷贝数据到缓冲区
+-    for(int i = 0; i < EEPROM_PAGE_SIZE; i++)
+-    {
+-        buffer[i + 2] = data[i];
+-    }
+-    
+-    status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, buffer, EEPROM_PAGE_SIZE + 2, HAL_MAX_DELAY);
+-    
+-    if(status == HAL_OK)
+-    {
+-        AT24C512_Delay(5); // 等待写周期
+-        return EEPROM_OK;
+-    }
+-    return EEPROM_ERROR;
++    if (page_num >= EEPROM_MAX_SIZE / EEPROM_PAGE_SIZE || data == NULL)
++        return EEPROM_INVALID_ARG;
++    return AT24C512_WriteBuffer((uint16_t)((uint32_t)page_num *
++                      EEPROM_PAGE_SIZE), data, EEPROM_PAGE_SIZE);
+ }
+ 
+-/**
+-  * @brief  整页读取
+-  * @param  page_num: 页号
+-  * @param  data: 数据指针
+-  * @retval 状态
+-  */
+ uint8_t AT24C512_ReadPage(uint16_t page_num, uint8_t *data)
+ {
+-    uint16_t start_addr;
+-    uint8_t addr_buffer[2];
+-    HAL_StatusTypeDef status;
+-    
+-    if(page_num >= 512) return EEPROM_ERROR;
+-    
+-    start_addr = page_num * EEPROM_PAGE_SIZE;
+-    addr_buffer[0] = (start_addr >> 8) & 0xFF;
+-    addr_buffer[1] = start_addr & 0xFF;
+-    
+-    status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, addr_buffer, 2, HAL_MAX_DELAY);
+-    if(status != HAL_OK) return EEPROM_ERROR;
+-    
+-    status = HAL_I2C_Master_Receive(&hi2c1, AT24C512_ADDR | 0x01, data, EEPROM_PAGE_SIZE, HAL_MAX_DELAY);
+-    
+-    return (status == HAL_OK) ? EEPROM_OK : EEPROM_ERROR;
++    if (page_num >= EEPROM_MAX_SIZE / EEPROM_PAGE_SIZE || data == NULL)
++        return EEPROM_INVALID_ARG;
++    return AT24C512_ReadBuffer((uint16_t)((uint32_t)page_num *
++                      EEPROM_PAGE_SIZE), data, EEPROM_PAGE_SIZE);
+ }
+ 
+-/**
+-  * @brief  多字节顺序写入(自动处理页边界)
+-  * @param  addr: 起始地址
+-  * @param  data: 数据指针
+-  * @param  len: 数据长度
+-  * @retval 状态
+-  */
+ uint8_t AT24C512_WriteBuffer(uint16_t addr, uint8_t *data, uint16_t len)
+ {
++    uint32_t current = addr;
++    uint16_t done = 0U;
++    uint16_t n;
++    uint32_t in_page;
+     HAL_StatusTypeDef status;
+-    uint16_t bytes_to_write;
+-    uint16_t bytes_written = 0;
+-    uint8_t buffer[EEPROM_PAGE_SIZE + 2]; // 最大一页+地址
+-    
+-    if((addr + len) > EEPROM_MAX_SIZE) return EEPROM_ERROR;
+-    
+-    while(bytes_written < len)
++
++    if (!Eep_Check_Range(addr, len) || (len != 0U && data == NULL))
++        return EEPROM_INVALID_ARG;
++
++    while (done < len)
+     {
+-        // 计算当前页剩余空间
+-        uint16_t page_offset = addr % EEPROM_PAGE_SIZE;
+-        uint16_t page_remaining = EEPROM_PAGE_SIZE - page_offset;
+-        
+-        bytes_to_write = (len - bytes_written < page_remaining) ? 
+-                        (len - bytes_written) : page_remaining;
+-        
+-        // 构建发送缓冲区
+-        buffer[0] = (addr >> 8) & 0xFF;
+-        buffer[1] = addr & 0xFF;
+-        
+-        for(int i = 0; i < bytes_to_write; i++)
+-        {
+-            buffer[i + 2] = data[bytes_written + i];
+-        }
+-        
+-        status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, buffer, 
+-                                       bytes_to_write + 2, HAL_MAX_DELAY);
+-        if(status != HAL_OK) return EEPROM_ERROR;
+-        
+-        AT24C512_Delay(5); // 等待写周期完成
+-        
+-        bytes_written += bytes_to_write;
+-        addr += bytes_to_write;
++        /* [B3] Never cross a physical 128-byte write-page boundary
++         * in the same I2C transaction: otherwise the chip wraps in-page. */
++        in_page = current % EEPROM_PAGE_SIZE;
++        n = (uint16_t)(EEPROM_PAGE_SIZE - in_page);
++        if (n > (uint16_t)(len - done)) n = (uint16_t)(len - done);
++
++        status = HAL_I2C_Mem_Write(&hi2c1, AT24C512_ADDR, (uint16_t)current,
++                                  I2C_MEMADD_SIZE_16BIT, data + done, n,
++                                  EEPROM_IO_TIMEOUT_MS);
++        if (status != HAL_OK) return Eep_Map_Status(status);
++        if (Eep_Wait_Write_Complete() != EEPROM_OK) return EEPROM_TIMEOUT;
++
++        current += n;
++        done = (uint16_t)(done + n);
+     }
+-    
+     return EEPROM_OK;
+ }
+ 
+-/**
+-  * @brief  多字节顺序读取
+-  * @param  addr: 起始地址
+-  * @param  data: 数据指针
+-  * @param  len: 数据长度
+-  * @retval 状态
+-  */
+ uint8_t AT24C512_ReadBuffer(uint16_t addr, uint8_t *data, uint16_t len)
+ {
+-    uint8_t addr_buffer[2];
++    uint32_t current = addr;
++    uint16_t done = 0U;
++    uint16_t n;
+     HAL_StatusTypeDef status;
+-    
+-    if((addr + len) > EEPROM_MAX_SIZE) return EEPROM_ERROR;
+-    
+-    addr_buffer[0] = (addr >> 8) & 0xFF;
+-    addr_buffer[1] = addr & 0xFF;
+-    
+-    // 先发送读取起始地址
+-    status = HAL_I2C_Master_Transmit(&hi2c1, AT24C512_ADDR, addr_buffer, 2, HAL_MAX_DELAY);
+-    if(status != HAL_OK) return EEPROM_ERROR;
+-    
+-    // 然后连续读取数据
+-    status = HAL_I2C_Master_Receive(&hi2c1, AT24C512_ADDR | 0x01, data, len, HAL_MAX_DELAY);
+-    
+-    return (status == HAL_OK) ? EEPROM_OK : EEPROM_ERROR;
++    if (!Eep_Check_Range(addr, len) || (len != 0U && data == NULL))
++        return EEPROM_INVALID_ARG;
++
++    /* [B3] Limit each HAL read to 128 bytes for predictable I2C timing.
++     * Sequential reads MAY cross pages; the controller advances across
++     * pages correctly, unlike page writes. */
++    while (done < len)
++    {
++        n = (uint16_t)(len - done);
++        if (n > EEPROM_PAGE_SIZE) n = EEPROM_PAGE_SIZE;
++
++        status = HAL_I2C_Mem_Read(&hi2c1, AT24C512_ADDR, (uint16_t)current,
++                                 I2C_MEMADD_SIZE_16BIT, data + done, n,
++                                 EEPROM_IO_TIMEOUT_MS);
++        if (status != HAL_OK) return Eep_Map_Status(status);
++        current += n;
++        done = (uint16_t)(done + n);
++    }
++    return EEPROM_OK;
+ }
+ 
+-/**
+-  * @brief  跨页写入函数(兼容旧接口)
+-  * @param  start_addr: 起始地址
+-  * @param  data: 数据指针
+-  * @param  len: 数据长度
+-  * @retval 状态
+-  */
+-uint8_t AT24C512_WriteCrossPages(uint16_t start_addr, uint8_t *data, uint16_t len)
++uint8_t AT24C512_WriteCrossPages(uint16_t start_addr,
++                                 uint8_t *data, uint16_t len)
+ {
+     return AT24C512_WriteBuffer(start_addr, data, len);
+ }
+ 
+-/**
+-  * @brief  检查EEPROM是否正常
+-  * @retval 状态: 0-正常, 1-异常
+-  */
+-uint8_t AT24C512_Check(void)
+-{
+-    uint8_t test_value = 0x55;
+-    uint8_t read_back;
+-    
+-    // 写入测试值
+-    if(AT24C512_WriteByte(0x0000, test_value) != EEPROM_OK)
+-        return EEPROM_ERROR;
+-    
+-    // 读取验证
+-    if(AT24C512_ReadByte(0x0000, &read_back) != EEPROM_OK)
+-        return EEPROM_ERROR;
+-    
+-    return (read_back == test_value) ? EEPROM_OK : EEPROM_ERROR;
+-}
+-
+-/**
+-  * @brief  延时函数
+-  * @param  delay: 延时时间(ms)
+-  */
+ void AT24C512_Delay(uint32_t delay)
+ {
+     HAL_Delay(delay);
+ }
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-

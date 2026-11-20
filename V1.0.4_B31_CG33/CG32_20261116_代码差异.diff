@@ -1,0 +1,1030 @@
+--- baseline/QINGJIAOBAN/USER/main.c
++++ CG32/QINGJIAOBAN/USER/main.c
+@@ -3,6 +3,7 @@
+ #include "usart_head.h"
+ #include "ads1110_head.h"
+ #include "adc161_head.h"
++#include "cg_angle_filter.h" /* [CG32-01] */
+ #include "lm9507_head.h"
+ 
+ 
+@@ -73,23 +74,9 @@
+     return sum&0x000000FF;
+ }
+ 
+-int16_t move_average(int16_t*datap,uint8_t len,uint8_t *i,int16_t data )
+-{
+-    int32_t sum = 0;
+-    int16_t max = -20000,min=20000;
+-    datap[*i] = data;
+-    (*i)++;
+-    if((*i) == len)
+-        (*i) = 0;
+-    for(uint8_t j=0;j<len;j++)
+-    {
+-        if(max<datap[j])max = datap[j];
+-        if(min>datap[j])min = datap[j];
+-        sum+=datap[j];
+-    }
+-    sum = sum-max-min;
+-    return sum/(len-2);
+-}
++/* [CG32-01] Signed inclination filtering is in cg_angle_filter.h.
++ * The old move_average() used +/-20000 extrema and an uninitialized
++ * 30-slot startup window, both of which corrupt signed endpoint results. */
+ /*
+     根据角度计算弧度值
+ */
+@@ -142,7 +129,6 @@
+ }
+ //变量定义区
+ #define ADS1110_BUFFER_SIZE 50
+-#define ADC161_BUFFER_SIZE  30
+ 
+ 
+ volatile uint8_t  send_en                           = 0; /* [B2] SysTick -> main */
+@@ -152,12 +138,11 @@
+ volatile uint32_t uart1_ack_bad_count                 = 0; /* [B2] malformed ACK */
+ uint8_t     ads1110_cnt                             = 0;
+ uint16_t    ads1110_buffer[ADS1110_BUFFER_SIZE];
+-uint8_t     adc161_cnt                              = 0;
+-int16_t     adc161_buffer[ADC161_BUFFER_SIZE];
+ uint16_t    ads1110_aver;
+ float       temper                                  = 0;
+ 
+-int16_t adc161_aver;
++int16_t adc161_aver; /* UART1 inclination payload */
++CG_ANGLE_FILTER CG_Angle_Filter; /* Keil Watch: raw/filtered/output */
+ 
+ 
+ 
+@@ -211,6 +196,7 @@
+     SysTick_Config(SystemCoreClock / 1000);
+     //角度数据处理初始化
+     DataParamDefult(&AngleParam);
++    CG_AngleFilter_Init(&CG_Angle_Filter);
+     while(1)
+     {
+         
+@@ -231,42 +217,18 @@
+         
+         
+         adc161_str.read(&adc161_str);
+-        AngleParam.realValue = move_average(adc161_buffer,ADC161_BUFFER_SIZE,&adc161_cnt,adc161_str.ad_data);
+-        //adc161_aver = AngleParam.realValue;
+-        if(abs(AngleParam.realValue-AngleParam.StableValue)>30)//检测到数据变化  需要重新变得数据
+-            AngleParam.flag = 1;
+-        
+-        if(AngleParam.flag == 1)
+-        {
+-            adc161_aver = AngleParam.realValue;
+-            if(abs(AngleParam.realValue-AngleParam.PreTempValue)<3)//数据稳定
+-            {
+-                AngleParam.tempCnt++;
+-                AngleParam.tempSumValue+= AngleParam.realValue;
+-                if(AngleParam.tempCnt == 5)//获取到新的稳定数据
+-                {
+-                    AngleParam.StableValue = AngleParam.tempSumValue/AngleParam.tempCnt;
+-                    adc161_aver = AngleParam.StableValue;
+-                    AngleParam.tempCnt = 0;
+-                    AngleParam.flag = 0;
+-                    AngleParam.PreTempValue = 0xFFFF;
+-                    
+-                }
+-            }
+-            else//数据未稳定
+-            {
+-                AngleParam.tempCnt = 0;
+-                AngleParam.tempSumValue = 0;
+-                AngleParam.PreTempValue = 0xFFFF;
+-            }
+-            AngleParam.PreTempValue = AngleParam.realValue;
+-        }
+-        
+-        
+-        
+-        
+-        
+-        
++        /* [CG32-01] Smooth all signed 16-bit samples, with no 30-AD blind zone.
++         * Remove the old unstable 5-sample accumulator entirely: it could
++         * retain an old sum, and its state machine caused unwanted latching.
++         * Keep AngleParam fields for existing Keil Watch procedures. */
++        adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
++        AngleParam.realValue = CG_Angle_Filter.filtered_value;
++        AngleParam.StableValue = CG_Angle_Filter.output_value;
++        AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
++        AngleParam.tempCnt = 0U;
++        AngleParam.tempSumValue = 0;
++        AngleParam.flag = 0U;
++
+         
+         /*
+             温度传感器
+--- /dev/null
++++ CG32/QINGJIAOBAN/USER/cg_angle_filter.h
+@@ -0,0 +1,76 @@
++#ifndef CG_ANGLE_FILTER_H
++#define CG_ANGLE_FILTER_H
++
++#include <stdint.h>
++
++/* [CG32-01] 30-sample trimmed moving average (discard one min and max).
++ * A 3-count output hysteresis is about 0.04 mm at factory CG calibration.
++ * This is a provisional engineering value, NOT an accuracy qualification.
++ * C99 and armcc5 compatible; no dynamic allocation or float processing. */
++#define CG_ANGLE_WINDOW_SIZE    30U
++#define CG_ANGLE_DEADBAND_AD     3L
++
++typedef struct
++{
++    int16_t samples[CG_ANGLE_WINDOW_SIZE];
++    uint8_t write_index;
++    uint8_t count;
++    uint8_t initialized;
++    int16_t raw_value;
++    int16_t filtered_value;
++    int16_t output_value;
++} CG_ANGLE_FILTER;
++
++static void CG_AngleFilter_Init(CG_ANGLE_FILTER *f)
++{
++    uint8_t i;
++    if (f == 0) return;
++    f->write_index = 0U;
++    f->count = 0U;
++    f->initialized = 0U;
++    f->raw_value = 0;
++    f->filtered_value = 0;
++    f->output_value = 0;
++    for (i = 0U; i < CG_ANGLE_WINDOW_SIZE; ++i) f->samples[i] = 0;
++}
++
++static int16_t CG_AngleFilter_Push(CG_ANGLE_FILTER *f, int16_t sample)
++{
++    int32_t sum = 0;
++    int16_t highest = INT16_MIN;
++    int16_t lowest  = INT16_MAX;
++    uint8_t i;
++    uint8_t n;
++    int32_t delta;
++    if (f == 0) return 0;
++    f->raw_value = sample;
++    f->samples[f->write_index] = sample;
++    f->write_index++;
++    if (f->write_index >= CG_ANGLE_WINDOW_SIZE) f->write_index = 0U;
++    if (f->count < CG_ANGLE_WINDOW_SIZE) f->count++;
++    n = f->count;
++    for (i = 0U; i < n; ++i)
++    {
++        int16_t value = f->samples[i];
++        sum += (int32_t)value;
++        if (value > highest) highest = value;
++        if (value < lowest) lowest = value;
++    }
++    if (n >= 3U)
++    {
++        sum -= (int32_t)highest + (int32_t)lowest;
++        f->filtered_value = (int16_t)(sum / (int32_t)(n - 2U));
++    }
++    else f->filtered_value = (int16_t)(sum / (int32_t)n);
++
++    delta = (int32_t)f->filtered_value - (int32_t)f->output_value;
++    if (!f->initialized || delta >= CG_ANGLE_DEADBAND_AD ||
++        delta <= -CG_ANGLE_DEADBAND_AD)
++    {
++        f->output_value = f->filtered_value;
++        f->initialized = 1U;
++    }
++    return f->output_value;
++}
++
++#endif /* CG_ANGLE_FILTER_H */
+--- baseline/QINGJIAOBAN/CLASS/SCR/adc161_code.c
++++ CG32/QINGJIAOBAN/CLASS/SCR/adc161_code.c
+@@ -2,7 +2,10 @@
+ 
+ void ADC161_DELAY(uint32_t tim)
+ {
+-    while(tim--);
++    /* [CG32-02] Volatile prevents armcc optimizing the bit-bang delay away.
++     * The exact ADC161 CLK frequency still requires a scope check. */
++    volatile uint32_t remaining = tim;
++    while (remaining != 0U) remaining--;
+ }
+ 
+ void ADC161_INIT(ADC161_STR *adc161_str)
+@@ -12,39 +15,35 @@
+     adc161_str->out->str_init(adc161_str->out);
+ }
+ 
+-int16_t uint16_twos_complement_to_int16_original(uint16_t tc) {
+-    // Step 1: 检测是否为负数
+-    if (tc & 0x8000) { // 最高位为1
+-        // Step 2: 计算补码对应的原码
+-        int16_t signed_tc = (int16_t)tc;  // 转换为有符号数（自动补码解析）
+-        signed_tc +=1;
+-        return signed_tc; // 直接返回int16_t类型补码（C语言自动处理）
+-    }
+-    // 正数直接返回
++/* [CG32-02] Standard 16-bit two's-complement interpretation.
++ * The previous signed shift was undefined when bit 15 became set, and
++ * adding 1 to all negative results gave an off-by-one error. */
++int16_t uint16_twos_complement_to_int16_original(uint16_t tc)
++{
++    if ((tc & 0x8000U) != 0U)
++        return (int16_t)((int32_t)tc - 65536L);
+     return (int16_t)tc;
+ }
+ 
+-
+ void ADC161_READ(ADC161_STR *adc161_str)
+ {
+-    int16_t ADC161data=0;
++    uint16_t raw = 0U;
++    uint8_t i;
+     adc161_str->cs->write(adc161_str->cs,Bit_RESET);
+-    ADC161_DELAY(10);
+-    for(uint8_t i=0;i<18;i++)
++    ADC161_DELAY(10U);
++    for (i = 0U; i < 18U; ++i)
+     {
+         adc161_str->clk->write(adc161_str->clk,Bit_RESET);
+-        ADC161_DELAY(10);
++        ADC161_DELAY(10U);
+         adc161_str->clk->write(adc161_str->clk,Bit_SET);
+-        ADC161_DELAY(10);
+-        if(i<=1)continue;
+-        ADC161data<<=1;
+-        if(adc161_str->out->read(adc161_str->out))
+-            ADC161data++;
++        ADC161_DELAY(10U);
++        if (i < 2U) continue; /* preserve the original 2 dummy clocks */
++        raw = (uint16_t)((uint16_t)(raw << 1) |
++                         (adc161_str->out->read(adc161_str->out) ? 1U : 0U));
+     }
+     adc161_str->cs->write(adc161_str->cs,Bit_SET);
+-    adc161_str->ad_data = uint16_twos_complement_to_int16_original(ADC161data);
++    adc161_str->ad_data = uint16_twos_complement_to_int16_original(raw);
+ }
+-
+ 
+ void ADC161_STR_INIT(ADC161_STR *adc161_str)
+ {
+--- /dev/null
++++ CG32/STM32L151/Software/inc/cg_cal_guard.h
+@@ -0,0 +1,28 @@
++#ifndef CG_CAL_GUARD_H
++#define CG_CAL_GUARD_H
++
++#include "param_head.h"
++
++/* [CG32-03] Both 180 mm calibration spans should be substantial.
++ * The factory spans are approximately 12446 / 12463 AD. 4000 AD is a
++ * conservative guard against slopes that could show thousands of mm.
++ * These values are provisional pending real sensor characterization. */
++#define CG_MIN_180MM_SPAN_AD  4000L
++#define CG_MAX_ZERO_GAP_AD   1500L
++#define CG_MAX_MEASURE_MM     240.0f
++
++static uint8_t CG_Calibration_Sane(const CG_Calibration_Param_Str *p)
++{
++    int32_t left_span, right_span, zero_gap;
++    if (p == 0) return 0U;
++    left_span = (int32_t)p->CG_Zero_Left_Ad - (int32_t)p->CG_Max_Left_Ad;
++    right_span = (int32_t)p->CG_Max_Right_Ad - (int32_t)p->CG_Zero_Right_Ad;
++    zero_gap = (int32_t)p->CG_Zero_Left_Ad - (int32_t)p->CG_Zero_Right_Ad;
++    if (zero_gap < 0) zero_gap = -zero_gap;
++    return (left_span >= CG_MIN_180MM_SPAN_AD &&
++            right_span >= CG_MIN_180MM_SPAN_AD &&
++            zero_gap <= CG_MAX_ZERO_GAP_AD &&
++            p->temp >= -40.0f && p->temp <= 100.0f) ? 1U : 0U;
++}
++
++#endif /* CG_CAL_GUARD_H */
+--- baseline/STM32L151/Software/src/App_Eep.c
++++ CG32/STM32L151/Software/src/App_Eep.c
+@@ -1,5 +1,6 @@
+ #include "App_Eep.h"
+ #include "at24c512_head.h"
++#include "cg_cal_guard.h" /* [CG32-03] stricter check for NEW CG saves only */
+ #include <string.h>
+ 
+ /* [B3] On-disk snapshot format (64 bytes):
+@@ -475,6 +476,10 @@
+     B3_CAL_DATA staged;
+     B3_CalibrationFromGlobals(&staged);
+     staged.cg=data;
++    /* [CG32-03] Do NOT change B3_SlotValid/ValidCG: existing CRC-valid
++     * B3 data is read intact, even when its CG values need re-calibration.
++     * Invalid NEW calibration must not consume an EEPROM commit. */
++    if (!CG_Calibration_Sane(&data)) return 0U;
+     return B3_SaveCalibration(&staged);
+ }
+ 
+--- baseline/STM32L151/Software/src/Algorithm_code.c
++++ CG32/STM32L151/Software/src/Algorithm_code.c
+@@ -1,5 +1,6 @@
+ #include "Algorithm_head.h"
+ #include "adc_head.h"
++#include "cg_cal_guard.h" /* [CG32-03] */
+ #include <stdlib.h>
+ 
+ float TempOffset = 0;
+@@ -15,60 +16,79 @@
+ static float B_CG_Left;
+ static float K_CG_Right;
+ static float B_CG_Right;
++static uint8_t CG_Coefficients_Valid = 0U;
++volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
++
+ void CG_Data_Init(void)
+ {
+-    /*居中偏移补偿函数*/
+-//    float Zero_Center_Ad = (CG_Param.CG_Zero_Left_Ad+CG_Param.CG_Zero_Right_Ad)/2.0;
+-//    float Max_Center_Ad = (CG_Param.CG_Max_Left_Ad+CG_Param.CG_Max_Right_Ad)/2.0;
+-//    //(Zero_Center_Ad,0),(Max_Center_Ad,180)
+-//    K_Center_Offset = 180.0/(Max_Center_Ad-Zero_Center_Ad);   //k = (y2-y1)/(x2-x1)
+-//    B_Center_Offset = 180-K_Center_Offset*Max_Center_Ad;      //b = y-kx
+-    /*左股拟合曲线函数*/
+-    //(CG_Param.CG_Zero_Left_Ad,0),(CG_Param.CG_Max_Left_Ad,180)
+-    K_CG_Left = 180.0/(CG_Param.CG_Max_Left_Ad-CG_Param.CG_Zero_Left_Ad);
+-    B_CG_Left = 180.0-K_CG_Left*CG_Param.CG_Max_Left_Ad;
+-    /*右股拟合曲线函数*/
+-    //(CG_Param.CG_Zero_Right_Ad,0),(CG_Param.CG_Max_Right_Ad,-180)
+-    K_CG_Right = -180.0/(CG_Param.CG_Max_Right_Ad-CG_Param.CG_Zero_Right_Ad);
+-    B_CG_Right = -180.0-K_CG_Right*CG_Param.CG_Max_Right_Ad;
++    /* [CG32-03] Never divide by a tiny or reversed AD separation. */
++    CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
++    K_CG_Left = 0.0f; B_CG_Left = 0.0f;
++    K_CG_Right = 0.0f; B_CG_Right = 0.0f;
++    if (!CG_Coefficients_Valid)
++    {
++        CG_Result_Status = CG_RESULT_CAL_ERROR;
++        return;
++    }
++    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad -
++                           (float)CG_Param.CG_Zero_Left_Ad);
++    B_CG_Left = -K_CG_Left * (float)CG_Param.CG_Zero_Left_Ad;
++    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad -
++                             (float)CG_Param.CG_Zero_Right_Ad);
++    B_CG_Right = -K_CG_Right * (float)CG_Param.CG_Zero_Right_Ad;
++    CG_Result_Status = CG_RESULT_OK;
+ }
+ 
++float Get_CG_Value(int16_t adc_value, float temp)
++{
++    int16_t zero_low, zero_high;
++    /* [CG32-03] Returned 0 on errors is NOT a measurement; callers must
++     * inspect CG_Result_Status and show an error, not 0.00 mm. */
++    CG_Value_r = 0.0f;
++    CG_Value_t = 0.0f;
++    if (!CG_Coefficients_Valid || !CG_Calibration_Sane(&CG_Param))
++    {
++        CG_Result_Status = CG_RESULT_CAL_ERROR;
++        return 0.0f;
++    }
++    if (!(temp >= -40.0f && temp <= 100.0f))
++    {
++        CG_Result_Status = CG_RESULT_TEMP_ERROR;
++        return 0.0f;
++    }
++    /* The coefficient is unchanged; the offset is now referenced to
++     * the ACTUAL temperature recorded with the four-point calibration.
++     * For factory CG_Param.temp=20, results match the previous formula. */
++    TempOffset = -0.054637f * (temp - CG_Param.temp);
++    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
++                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
++    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
++                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
++    if (adc_value < zero_low)
++        CG_Value_t = (float)adc_value * K_CG_Left + B_CG_Left;
++    else if (adc_value > zero_high)
++        CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
++    else
++        CG_Value_t = 0.0f;
+ 
+-
+-float Get_CG_Value(int16_t CG_Ad,float temp)
+-{
+-//    CG_Zero_Offset_t = (CG_Param.CG_Zero_Right_Ad+CG_Param.CG_Zero_Left_Ad)>>1;
+-//    if(CG_Ad<CG_Param.CG_Zero_Left_Ad)
+-//    {
+-//        CG_Value_t = (CG_Ad-CG_Param.CG_Zero_Left_Ad)*180.0/(CG_Param.CG_Max_Left_Ad - CG_Param.CG_Zero_Left_Ad);
+-//        CG_Zero_Offset = (CG_Zero_Offset_t-CG_Param.CG_Zero_Left_Ad)*180.0/(CG_Param.CG_Max_Left_Ad - CG_Param.CG_Zero_Left_Ad);
+-//    }
+-//    else if(CG_Ad>CG_Param.CG_Zero_Right_Ad)
+-//    {
+-//        CG_Value_t = (CG_Ad-CG_Param.CG_Zero_Right_Ad)*(-180.0)/(CG_Param.CG_Max_Right_Ad - CG_Param.CG_Zero_Right_Ad);
+-//        CG_Zero_Offset = (CG_Zero_Offset_t-CG_Param.CG_Zero_Right_Ad)*(-180.0)/(CG_Param.CG_Max_Right_Ad - CG_Param.CG_Zero_Right_Ad); 
+-//    }
+-//    else
+-//    {
+-//        CG_Value_t = 0;
+-//        CG_Zero_Offset = 0;
+-//    }
+-    TempOffset = -0.054637*temp+1.09274;
+-    if(CG_Ad<CG_Param.CG_Zero_Left_Ad)
+-        CG_Value_t = CG_Ad*K_CG_Left+B_CG_Left;
+-    else if(CG_Ad>CG_Param.CG_Zero_Right_Ad)
+-        CG_Value_t = CG_Ad*K_CG_Right+B_CG_Right;
+-    else 
+-        CG_Value_t = 0;
+-    
+-    
+-    
+-    CG_Value_r = round(((CG_Value_t-TempOffset))/0.05)*0.05*left_And_Righe_Status;
+-    
+-    
+-    
+-    
+-    
++    /* Never round and display a 3000 mm result as valid CG data.
++     * Do not silently clip to +/-240: show a distinct error instead. */
++    if (!(CG_Value_t >= -CG_MAX_MEASURE_MM &&
++          CG_Value_t <= CG_MAX_MEASURE_MM))
++    {
++        CG_Result_Status = CG_RESULT_RANGE_ERROR;
++        return 0.0f;
++    }
++    CG_Value_r = roundf((CG_Value_t - TempOffset) / 0.05f) *
++                 0.05f * (float)left_And_Righe_Status;
++    if (!(CG_Value_r >= -CG_MAX_MEASURE_MM &&
++          CG_Value_r <= CG_MAX_MEASURE_MM))
++    {
++        CG_Result_Status = CG_RESULT_RANGE_ERROR;
++        CG_Value_r = 0.0f;
++        return 0.0f;
++    }
++    CG_Result_Status = CG_RESULT_OK;
+     return CG_Value_r;
+ }
+ 
+--- baseline/STM32L151/Software/inc/algorithm_head.h
++++ CG32/STM32L151/Software/inc/algorithm_head.h
+@@ -8,8 +8,16 @@
+ 
+ 
+ 
+-/* [CGFIX-01] Rebuild the CG coefficients after EEPROM load or calibration. */
+-void CG_Data_Init(void);
++/* [CGFIX-01] Rebuild the CG coefficients after EEPROM load or calibration.
++ * [CG32-03] An invalid reading returns 0 but must NEVER be shown as 0 mm. */
++#define CG_RESULT_OK           0U
++#define CG_RESULT_CAL_ERROR    1U
++#define CG_RESULT_RANGE_ERROR  2U
++#define CG_RESULT_TEMP_ERROR   3U
++#define CG_RESULT_NO_SENSOR    4U
++#define CG_RESULT_EEP_ERROR    5U
++extern volatile uint8_t CG_Result_Status;
++void CG_Data_Init(void);
+ float Get_CG_Value(int16_t CG_Ad,float temp);
+ 
+ float Get_GJ_Value(uint16_t GJ_Ad,float temp);
+--- baseline/STM32L151/Software/src/App_code.c
++++ CG32/STM32L151/Software/src/App_code.c
+@@ -1,11 +1,14 @@
+ #include "App_oled.h"
+ #include "pcf8563_head.h"
+ #include "Algorithm_head.h"
++#include "agreement_head.h" /* [CG32-04] sensor-frame freshness */
++#include "App_Eep.h"        /* [CG32-04] EEPROM readiness */
+ #include "adc_head.h"
+ 
+-static PAGE_FUN_T Page_Fun_Buffere[page_size];
+-/* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
++static PAGE_FUN_T Page_Fun_Buffere[page_size];
++/* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
+ static uint8_t Main_Values_Need_Redraw = 1U;
++static uint8_t CG_Display_Status_History = 0xFFU;
+ 
+ 
+ 
+@@ -38,6 +41,7 @@
+ void Main_Page_Init(void)
+ {
+     Main_Values_Need_Redraw = 1U;
++    CG_Display_Status_History = 0xFFU;
+     CG_Value_History = 0;
+     GJ_Value_History = 0;
+     left_And_Righe_Status_History = 1-left_And_Righe_Status;
+@@ -70,19 +74,47 @@
+     }
+     
+     /*显示超高数值*/
++    /* [CG32-04] Error status takes precedence over a numeric zero.
++     * Leave the raw CG_Ad and CG_Value_t available in Keil Watch. */
+     CG_Value = Get_CG_Value(CG_Ad,Temp);
+-    //获取超高数据
+-    if(Main_Values_Need_Redraw || CG_Value_History != CG_Value)
+-    {
+-        if(Data_Show_Percision == 1)
+-            snprintf(buffer,sizeof(buffer),"%+07.2f",CG_Value);
+-        else
+-            snprintf(buffer,sizeof(buffer),"%+06.1f",CG_Value);
+-        OLED_PrintString(52,5,buffer,FONT_8X16);
+-        CG_Value_History  =  CG_Value;
+-    }
+-    
+-    Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
++    {
++        uint8_t state = CG_Result_Status;
++        if (!Sensor_Data_Is_Fresh()) state = CG_RESULT_NO_SENSOR;
++        if (Eep_Get_Storage_State() != EEP_STATE_B3_VALID)
++            state = CG_RESULT_EEP_ERROR;
++        if (Main_Values_Need_Redraw ||
++            CG_Display_Status_History != state ||
++            (state == CG_RESULT_OK && CG_Value_History != CG_Value))
++        {
++            /* Clear the whole old number, including previous sign/digits.
++             * Nine 8px characters fit in x=52..123 of a 128px OLED. */
++            OLED_PrintString(52,5,"         ",FONT_8X16);
++            if (state == CG_RESULT_OK)
++            {
++                if(Data_Show_Percision == 1)
++                    snprintf(buffer,sizeof(buffer),"%+07.2f",CG_Value);
++                else
++                    snprintf(buffer,sizeof(buffer),"%+06.1f",CG_Value);
++            }
++            else if (state == CG_RESULT_CAL_ERROR)
++                snprintf(buffer,sizeof(buffer),"CAL ERROR");
++            else if (state == CG_RESULT_RANGE_ERROR)
++                snprintf(buffer,sizeof(buffer),"CG RANGE");
++            else if (state == CG_RESULT_TEMP_ERROR)
++                snprintf(buffer,sizeof(buffer),"TEMP ERR");
++            else if (state == CG_RESULT_EEP_ERROR)
++                snprintf(buffer,sizeof(buffer),"EEP ERR");
++            else
++                snprintf(buffer,sizeof(buffer),"NO SENSOR");
++            OLED_PrintString(52,5,buffer,FONT_8X16);
++            CG_Display_Status_History = state;
++            CG_Value_History = CG_Value;
++        }
++        /* Only use a VALID physical measurement for goal alarm. */
++        if (state != CG_RESULT_OK) CG_Value_History = 0.0f;
++    }
++
++    Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
+     /*显示时间*/
+     //获取时间数据
+     PCF8563_TimeTypeDef time;
+@@ -127,7 +159,9 @@
+     if(Goal_Set_Status == 1)
+     {
+         OLED_PrintString(5,1,"MUBIAO",FONT_6X8);
+-        if(CG_Value>Goal_CG_Min_Value && CG_Value<Goal_CG_Max_Value)
++        if (CG_Result_Status == CG_RESULT_OK && Sensor_Data_Is_Fresh() &&
++            Eep_Get_Storage_State() == EEP_STATE_B3_VALID &&
++            CG_Value>Goal_CG_Min_Value && CG_Value<Goal_CG_Max_Value)
+         {
+             Beep_Ctrl(100,3);
+         }
+@@ -490,7 +524,7 @@
+ 
+ void CG_Calibration_Page_Init(void)
+ {
+-    CG_Calibration_Status = 0;
++    CG_Calibration_Status = 0;
+     CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
+ //    CG_Calibration_Tim_Current = 0;
+ //    CG_Calibration_Tim_History = 0;
+@@ -569,7 +603,11 @@
+         case 8:
+             /* [CGFIX-03] Collected four AD points, NOT saved yet. */
+             OLED_PrintChinese(32,1,"超高标定");
+-            if(CG_Cal_Save_Failed)
++            if(CG_Cal_Save_Failed == 3U)
++                OLED_PrintString(28,4,"NO SENSOR",FONT_8X16);
++            else if(CG_Cal_Save_Failed == 2U)
++                OLED_PrintString(28,4,"CAL ERROR",FONT_8X16);
++            else if(CG_Cal_Save_Failed)
+                 OLED_PrintString(28,4,"EEP ERROR",FONT_8X16);
+             else
+                 OLED_PrintChinese(24,4,"存储键保存");
+@@ -583,6 +621,9 @@
+             set_PageId(page_calibration_menu);
+             break;
+     }
++    /* [CG32-05] Error also visible on the four capture prompt pages. */
++    if (CG_Cal_Save_Failed == 3U && CG_Calibration_Status < 8U)
++        OLED_PrintString(28,6,"NO SENSOR",FONT_8X16);
+ }
+ 
+ /*************************轨距标定设置界面***************************/
+--- baseline/STM32L151/Software/src/App_key.c
++++ CG32/STM32L151/Software/src/App_key.c
+@@ -1,8 +1,10 @@
+ #include "App_key.h"
+ #include "pcf8563_head.h"
+ #include "key_head.h"
+-#include "App_Eep.h"
++#include "App_Eep.h"
+ #include "Algorithm_head.h" /* [CGFIX-01] */
++#include "cg_cal_guard.h" /* [CG32-03] */
++#include "agreement_head.h" /* [CG32-05] guard stale calibration input */
+ 
+ 
+ 
+@@ -271,7 +273,7 @@
+                              Password_Input_Temp[3]*100+
+                              Password_Input_Temp[4]*10+
+                              Password_Input_Temp[5];
+-    /* [B3] Commit the complete CRC-protected calibration/password snapshot. */
++    /* [B3] Commit the complete CRC-protected calibration/password snapshot. */
+     if(Eep_Save_Password(Password_Temp) == 1)
+         Beep_Ctrl(100,1);
+     else
+@@ -303,6 +305,21 @@
+ 
+ void CG_Calibration_Storage(void)
+ {
++    /* [CG32-05] Never commit a value from a dead 500 ms sensor link. */
++    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
++         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U ||
++         CG_Calibration_Status == 8U) && !Sensor_Data_Is_Fresh())
++    {
++        CG_Cal_Save_Failed = 3U;
++        CG_Calibration_Status_History = 0xFFU;
++        Beep_Ctrl(100,3);
++        return;
++    }
++    if (CG_Cal_Save_Failed == 3U)
++    {
++        CG_Cal_Save_Failed = 0U;
++        CG_Calibration_Status_History = 0xFFU;
++    }
+     CG_Calibration_Status++;
+     switch(CG_Calibration_Status)
+     {
+@@ -318,23 +335,31 @@
+         case 7:
+             CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad;
+             break;
+-        case 9:
+-            /* [B3] All five CG fields are written together to a new
+-             * validated A/B snapshot, never to legacy overlapping bytes. */
+-            CG_Param_Temp.temp = Temp;
+-            if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
+-            {
+-                CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
+-                CG_Cal_Save_Failed = 1U; /* [CGFIX-03] Do not claim success. */
+-                CG_Calibration_Status_History = 0xFFU; /* force OLED_Clear() */
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            /* [CGFIX-01] Eep_Save_CG_Calibration updates CG_Param only
+-             * after verified commit. Recompute K/B for immediate use. */
+-            CG_Data_Init();
+-            CG_Cal_Save_Failed = 0U;
+-            Beep_Ctrl(100,1);
++        case 9:
++            /* [B3] All five CG fields are written together to a new
++             * validated A/B snapshot, never to legacy overlapping bytes. */
++            CG_Param_Temp.temp = Temp;
++            if (!CG_Calibration_Sane(&CG_Param_Temp))
++            {
++                CG_Calibration_Status = 8U;
++                CG_Cal_Save_Failed = 2U; /* Invalid 180mm AD span/zero gap */
++                CG_Calibration_Status_History = 0xFFU;
++                Beep_Ctrl(100,3);
++                return;
++            }
++            if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
++            {
++                CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
++                CG_Cal_Save_Failed = 1U; /* [CGFIX-03] Do not claim success. */
++                CG_Calibration_Status_History = 0xFFU; /* force OLED_Clear() */
++                Beep_Ctrl(100,3);
++                return;
++            }
++            /* [CGFIX-01] Eep_Save_CG_Calibration updates CG_Param only
++             * after verified commit. Recompute K/B for immediate use. */
++            CG_Data_Init();
++            CG_Cal_Save_Failed = 0U;
++            Beep_Ctrl(100,1);
+             break;
+     }
+ }
+@@ -356,16 +381,16 @@
+         case 5:
+             GJ_Param_Temp.GJ_1470_Ad   = GJ_Ad;
+             break;
+-        case 7:
+-            /* [B3] One validated atomic-ish A/B update for GJ points. */
+-            GJ_Param_Temp.temp = Temp;
+-            if (Eep_Save_GJ_Calibration(GJ_Param_Temp) == 0)
+-            {
+-                GJ_Calibration_Status = 6;
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            Beep_Ctrl(100,1);
++        case 7:
++            /* [B3] One validated atomic-ish A/B update for GJ points. */
++            GJ_Param_Temp.temp = Temp;
++            if (Eep_Save_GJ_Calibration(GJ_Param_Temp) == 0)
++            {
++                GJ_Calibration_Status = 6;
++                Beep_Ctrl(100,3);
++                return;
++            }
++            Beep_Ctrl(100,1);
+             break;
+     }
+ }
+@@ -381,16 +406,16 @@
+         case 3:
+             CH_Param_Temp.HB_Ad = GJ_Ad;
+             break;
+-        case 5:
+-            /* [B3] CH ADC/temperature now stored outside legacy node index. */
+-            CH_Param_Temp.temp = Temp;
+-            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
+-            {
+-                CH_Calibration_Status = 4;
+-                Beep_Ctrl(100,3);
+-                return;
+-            }
+-            Beep_Ctrl(100,1);
++        case 5:
++            /* [B3] CH ADC/temperature now stored outside legacy node index. */
++            CH_Param_Temp.temp = Temp;
++            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
++            {
++                CH_Calibration_Status = 4;
++                Beep_Ctrl(100,3);
++                return;
++            }
++            Beep_Ctrl(100,1);
+             break;
+     }
+ }
+--- baseline/STM32L151/Software/src/param_code.c
++++ CG32/STM32L151/Software/src/param_code.c
+@@ -53,7 +53,7 @@
+ uint8_t Percision_Menu_Select_History = 1;      //精度设置界面  上一次选择精度项
+ uint8_t Data_Show_Percision = 1;                //精度设置界面  当前设置精度  0：精度1    1：精度2
+ 
+-uint8_t CG_Cal_Save_Failed = 0;                 // [CGFIX-03] EEPROM write failure displayed explicitly
++uint8_t CG_Cal_Save_Failed = 0;                 // [CG32-05] 0=OK,1=EEP,2=bad CG cal,3=no sensor
+ uint8_t CG_Calibration_Status = 0;              //超高标定界面  当前超高标定步骤
+ uint8_t CG_Calibration_Status_History = 1;      //超高标定界面  上一次超高标定步骤
+ 
+--- baseline/STM32L151/Software/inc/param_head.h
++++ CG32/STM32L151/Software/inc/param_head.h
+@@ -198,7 +198,7 @@
+ extern uint8_t Percision_Menu_Select_History ;
+ extern uint8_t Data_Show_Percision ;
+ 
+-extern uint8_t CG_Cal_Save_Failed; /* [CGFIX-03] */
++extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor */
+ extern uint8_t CG_Calibration_Status;
+ extern uint8_t CG_Calibration_Status_History;
+ 
+--- baseline/CG_FIX_HOST_TESTS/test_cg.py
++++ CG32/CG_FIX_HOST_TESTS/test_cg.py
+@@ -22,7 +22,9 @@
+ assert main.index('B3_Eeprom_Boot_OK = Eep_Data_Get();') < main.index('CG_Data_Init();')
+ assert main.count('CG_Data_Init();') == 1
+ assert 'CG_Param = c->cg;' in eep and 'B3_CalibrationToGlobals(new_data);' in eep
+-assert 'if(Main_Values_Need_Redraw || CG_Value_History != CG_Value)' in display
++assert 'CG_Display_Status_History != state' in display
++assert 'CG_Result_Status' in display and 'CG RANGE' in display
++assert 'CG_MAX_MEASURE_MM' in algo and 'CG_Calibration_Sane' in algo
+ assert 'if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)' in display
+ assert 'Main_Values_Need_Redraw = 1U;' in display
+ assert 'Main_Values_Need_Redraw = 0U;' in display
+@@ -30,7 +32,7 @@
+ case8 = cg_section.split('        case 8:', 1)[1].split('        case 9:', 1)[0]
+ case9 = cg_section.split('        case 9:', 1)[1].split('        case 10:', 1)[0]
+ assert '"鎴愬姛"' not in case8 and '"鎴愬姛"' in case9
+-assert 'CG_Cal_Save_Failed' in case8 and '"EEP ERROR"' in case8
++assert 'CG_Cal_Save_Failed' in case8 and '"EEP ERROR"' in case8 and '"CAL ERROR"' in case8
+ assert 'EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE 0' in get('STM32L151/Software/inc/App_Eep.h')
+ assert 'EEP_B3_SERVICE_IMPORT_LEGACY_COUNT       0' in get('STM32L151/Software/inc/App_Eep.h')
+ 
+@@ -57,6 +59,11 @@
+ extern CG_Calibration_Param_Str CG_Param;
+ extern GJ_Calibration_Param_Str GJ_Param;
+ extern int8_t left_And_Righe_Status;
++#define CG_RESULT_OK 0U
++#define CG_RESULT_CAL_ERROR 1U
++#define CG_RESULT_RANGE_ERROR 2U
++#define CG_RESULT_TEMP_ERROR 3U
++extern volatile uint8_t CG_Result_Status;
+ extern float POWER_Vol, GJ_Value;
+ void CG_Data_Init(void);
+ float Get_CG_Value(int16_t CG_Ad, float temp);
+@@ -65,6 +72,8 @@
+ #endif
+ ''')
+     (d / 'adc_head.h').write_text('float ADC_GetVrefintVoltage(void);\n')
++    guard = get('STM32L151/Software/inc/cg_cal_guard.h').replace('#include "param_head.h"', '#include "Algorithm_head.h"')
++    (d / 'cg_cal_guard.h').write_text(guard, encoding='utf-8')
+     (d / 'Algorithm_code.c').write_text(algo, encoding='utf-8')
+     (d / 'test_math.c').write_text(r'''
+ #include <stdio.h>
+@@ -79,6 +88,7 @@
+ int main(void) {
+   /* Before the coefficients are initialized, all CG AD values map to 0 at 20C. */
+   assert(Get_CG_Value(-12445,20) == 0.0f);
++  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
+   CG_Data_Init();
+   assert(fabsf(Get_CG_Value(-12445,20) - 180.0f) < 0.051f);
+   assert(fabsf(Get_CG_Value(12513,20) + 180.0f) < 0.051f);
+@@ -94,7 +104,23 @@
+   assert(fabsf(Get_CG_Value(-9000,20) - 180.0f) < 0.051f);
+   assert(fabsf(Get_CG_Value(9000,20) + 180.0f) < 0.051f);
+   assert(fabsf(Get_CG_Value(110,20)) < 0.051f);
+-  puts("CG math: PASS; before init fixed at zero, then valid endpoints and recalibration");
++  CG_Param.CG_Zero_Left_Ad=10; CG_Param.CG_Max_Left_Ad=0;
++  CG_Data_Init();
++  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
++  assert(Get_CG_Value(-70,20)==0.0f);
++  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
++  CG_Param.CG_Zero_Left_Ad=1; CG_Param.CG_Max_Left_Ad=-12445;
++  CG_Param.CG_Zero_Right_Ad=50; CG_Param.CG_Max_Right_Ad=12513;
++  CG_Param.temp=23;
++  CG_Data_Init();
++  assert(fabsf(Get_CG_Value(25,23))<0.001f);
++  assert(CG_Result_Status == CG_RESULT_OK);
++  assert(fabsf(Get_CG_Value(25,25)-0.10f)<0.06f);
++  assert(Get_CG_Value(-30000,23)==0.0f);
++  assert(CG_Result_Status == CG_RESULT_RANGE_ERROR);
++  assert(Get_CG_Value(100,105)==0.0f);
++  assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
++  puts("CG math: PASS; startup/invalid spans/range, endpoints, temp reference");
+   return 0;
+ }
+ ''')
+@@ -104,7 +130,10 @@
+ #include <stdint.h>
+ #include <assert.h>
+ #include "Algorithm_head.h"
++#include "cg_cal_guard.h"
+ CG_Calibration_Param_Str CG_Param, CG_Param_Temp;
++static uint8_t link_fresh=1;
++uint8_t Sensor_Data_Is_Fresh(void) {return link_fresh;}
+ int16_t CG_Ad=0;
+ float Temp=20.5f;
+ uint8_t CG_Calibration_Status=0, CG_Calibration_Status_History=8, CG_Cal_Save_Failed=0;
+@@ -117,6 +146,9 @@
+ void Beep_Ctrl(uint16_t period,uint8_t times) {(void)period; beeps=times;}
+ ''' + func + r'''
+ int main(void) {
++  link_fresh=0; CG_Ad=100; CG_Calibration_Storage();
++  assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==3);
++  link_fresh=1;
+   CG_Ad=100;   CG_Calibration_Storage(); assert(CG_Calibration_Status==1);
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==2);
+   CG_Ad=150;   CG_Calibration_Storage(); assert(CG_Calibration_Status==3);
+@@ -125,6 +157,9 @@
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==6);
+   CG_Ad=9000;  CG_Calibration_Storage(); assert(CG_Calibration_Status==7);
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==8 && save_calls==0);
++  link_fresh=0; CG_Calibration_Storage();
++  assert(CG_Calibration_Status==8 && CG_Cal_Save_Failed==3 && save_calls==0);
++  link_fresh=1;
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==8 && save_calls==1);
+   assert(CG_Cal_Save_Failed==1 && beeps==3 && init_calls==0);
+   assert(CG_Calibration_Status_History==0xFFU);
+@@ -135,7 +170,12 @@
+   assert(CG_Param.CG_Max_Left_Ad==-9000 && CG_Param.CG_Max_Right_Ad==9000);
+   assert(CG_Param.temp==20.5f);
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==10 && save_calls==2);
+-  puts("CG key: PASS; save not premature, write-failure retry, success rebuilds coefficients");
++  CG_Calibration_Status=8; CG_Cal_Save_Failed=0;
++  CG_Param_Temp.CG_Max_Left_Ad=99;
++  CG_Calibration_Storage();
++  assert(CG_Calibration_Status==8 && CG_Cal_Save_Failed==2);
++  assert(save_calls==2 && init_calls==1);
++  puts("CG key: PASS; save not premature, failed/implausible saves rejected");
+   return 0;
+ }
+ ''')
+--- baseline/B31_HOST_TESTS/test_b31.c
++++ CG32/B31_HOST_TESTS/test_b31.c
+@@ -252,6 +252,11 @@
+     CHECK(Eep_Output_Node(0U,&n)==0 && n.data1==node(0).data1);
+     CHECK(Eep_Save_Password(9999999UL)==0);
+     CHECK(Driver_Calibration_Password==654321UL && writes==before);
++    /* [CG32] New bad calibration must never write or replace good slots. */
++    cg=CG_Param; cg.CG_Max_Left_Ad = (int16_t)(cg.CG_Zero_Left_Ad-10);
++    CHECK(Eep_Save_CG_Calibration(cg)==0U && writes==before);
++    cg=CG_Param; cg.CG_Zero_Right_Ad = (int16_t)(cg.CG_Zero_Left_Ad+2000);
++    CHECK(Eep_Save_CG_Calibration(cg)==0U && writes==before);
+ }
+ 
+ static void test_cal_rollback_and_wp(void)
+--- /dev/null
++++ CG32/CG32_HOST_TESTS/test_filter.c
+@@ -0,0 +1,40 @@
++#include <stdio.h>
++#include <stdint.h>
++#include <assert.h>
++#include "cg_angle_filter.h"
++static unsigned checks = 0;
++#define CHECK(p) do { assert(p); checks++; } while(0)
++static void stabilize(CG_ANGLE_FILTER *f, int16_t v)
++{
++    int i;
++    for (i=0; i<35; ++i) CG_AngleFilter_Push(f,v);
++}
++int main(void)
++{
++    CG_ANGLE_FILTER f;
++    CG_AngleFilter_Init(&f);
++    CHECK(CG_AngleFilter_Push(&f,1500)==1500); /* never average 29 zeroes */
++    stabilize(&f,1500); CHECK(f.output_value==1500);
++    stabilize(&f,1502); CHECK(f.output_value==1500); /* <3 AD is held */
++    stabilize(&f,1503); CHECK(f.output_value==1503); /* >=3 AD updates */
++    CG_AngleFilter_Init(&f);
++    stabilize(&f,1500);
++    CG_AngleFilter_Push(&f,32767); /* one gross spike is trimmed */
++    CHECK(f.output_value==1500);
++    CG_AngleFilter_Push(&f,-32768); /* another gross spike is trimmed */
++    CHECK(f.output_value==1500);
++    CG_AngleFilter_Init(&f);
++    stabilize(&f,-32768); CHECK(f.filtered_value==-32768);
++    stabilize(&f,32767); CHECK(f.filtered_value==32767);
++    stabilize(&f,-12445); CHECK(f.output_value==-12445);
++    stabilize(&f,12513); CHECK(f.output_value==12513);
++    stabilize(&f,-12445); CHECK(f.output_value==-12445);
++    CG_AngleFilter_Init(&f);
++    stabilize(&f,600);
++    for (int v=601;v<=630;v++) {
++        stabilize(&f,(int16_t)v);
++        CHECK(f.output_value<=v && f.output_value>=v-2);
++    }
++    printf("CG32 filter: PASS (%u checks, -32768..32767, 3AD, spike/return)\n",checks);
++    return 0;
++}
+--- /dev/null
++++ CG32/CG32_HOST_TESTS/test_adc.c
+@@ -0,0 +1,27 @@
++#include <stdio.h>
++#include <assert.h>
++#include "adc161_head.h"
++static uint16_t raw_bits;
++static unsigned read_idx, clocks;
++static void write_gpio(Gpio *x,uint8_t v) { (void)x; (void)v; clocks++; }
++static uint8_t read_gpio(Gpio *x) {
++    (void)x;
++    assert(read_idx < 16U);
++    return (raw_bits >> (15U-read_idx++)) & 1U;
++}
++static void init_gpio(Gpio *x) { (void)x; }
++static Gpio gpio={write_gpio,read_gpio,init_gpio};
++int main(void) {
++    ADC161_STR f={&gpio,&gpio,&gpio,0,0,0,0};
++    const uint16_t raw[] = {0U,1U,0x7FFFU,0x8000U,0xFFFFU,0xBFA0U,0x4000U};
++    const int16_t expected[] = {0,1,32767,-32768,-1,-16480,16384};
++    for (unsigned i=0;i<sizeof(raw)/sizeof(raw[0]);i++) {
++        raw_bits=raw[i];read_idx=0U;clocks=0U;
++        ADC161_READ(&f);
++        assert(read_idx==16U && clocks==38U);
++        assert(f.ad_data==expected[i]);
++        assert(uint16_twos_complement_to_int16_original(raw[i])==expected[i]);
++    }
++    puts("CG32 ADC161 bitstream: PASS (7 full-sign cases, 18 clocks)");
++    return 0;
++}
+--- /dev/null
++++ CG32/CG32_HOST_TESTS/adc161_head.h
+@@ -0,0 +1,19 @@
++#ifndef MOCK_ADC161_HEAD
++#define MOCK_ADC161_HEAD
++#include <stdint.h>
++#define Bit_RESET 0U
++#define Bit_SET 1U
++typedef struct Gpio Gpio;
++struct Gpio { void (*write)(Gpio *,uint8_t); uint8_t (*read)(Gpio *); void (*str_init)(Gpio *); };
++typedef Gpio GPIO_STR;
++typedef struct ADC161_CLASS_STR {
++    GPIO_STR *cs, *clk, *out;
++    int16_t ad_data;
++    void (*str_init)(struct ADC161_CLASS_STR*);
++    void (*init)(struct ADC161_CLASS_STR*);
++    void (*read)(struct ADC161_CLASS_STR*);
++} ADC161_STR;
++void ADC161_STR_INIT(ADC161_STR *);
++void ADC161_READ(ADC161_STR *);
++int16_t uint16_twos_complement_to_int16_original(uint16_t);
++#endif
+--- /dev/null
++++ CG32/CG32_HOST_TESTS/run_cg32_tests.sh
+@@ -0,0 +1,14 @@
++#!/bin/sh
++set -eu
++HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
++T=$(mktemp -d /tmp/cg32_XXXXXX)
++trap 'rm -rf "$T"' EXIT
++cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-pointer -I "$ROOT/QINGJIAOBAN/USER" "$HERE/test_filter.c" -o "$T/test_filter"
++UBSAN_OPTIONS=halt_on_error=1 "$T/test_filter"
++cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-pointer -I "$HERE" "$ROOT/QINGJIAOBAN/CLASS/SCR/adc161_code.c" "$HERE/test_adc.c" -o "$T/test_adc"
++UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
++python3 "$ROOT/CG_FIX_HOST_TESTS/test_cg.py"
++sh "$ROOT/B31_HOST_TESTS/run_b31_tests.sh"
++sh "$ROOT/B2_HOST_TESTS/run_master_tests.sh"
++python3 "$ROOT/B2_HOST_TESTS/test_qing.py"

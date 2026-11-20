@@ -1,0 +1,15 @@
+第三批 B3 相对用户上传 V1.0.2_B2 的实际修改文件（不含本次新增文件）：
+
+B2_HOST_TESTS/run_master_tests.sh
+B2_HOST_TESTS/test_main.c
+B2_HOST_TESTS/test_qing.py
+STM32L151/Core/Src/main.c
+STM32L151/Software/inc/App_Eep.h
+STM32L151/Software/inc/at24c512_head.h
+STM32L151/Software/src/App_Eep.c
+STM32L151/Software/src/App_key.c
+STM32L151/Software/src/agreement_code.c
+STM32L151/Software/src/at21c512_code.c
+
+新增 B3_HOST_TESTS/、B3_* 日志、README_B3.md、BATCH3_CHANGELOG.md 等。
+B1/B2 原始日志字节级未更改；倾角板 .c/.h 原码字节级未更改。

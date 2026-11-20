@@ -1,0 +1,126 @@
+--- CG32/STM32L151/Software/src/Algorithm_code.c
++++ CG33/STM32L151/Software/src/Algorithm_code.c
+@@ -69,27 +69,15 @@
+     else if (adc_value > zero_high)
+         CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
+     else
+         CG_Value_t = 0.0f;
+ 
+-    /* Never round and display a 3000 mm result as valid CG data.
+-     * Do not silently clip to +/-240: show a distinct error instead. */
+-    if (!(CG_Value_t >= -CG_MAX_MEASURE_MM &&
+-          CG_Value_t <= CG_MAX_MEASURE_MM))
+-    {
+-        CG_Result_Status = CG_RESULT_RANGE_ERROR;
+-        return 0.0f;
+-    }
++    /* [CG33-01] Display out-of-range numeric measurements for diagnostics.
++     * Do not suppress values beyond +/-240 mm. This does not establish
++     * accuracy or replace the calibration and sensor-integrity checks. */
+     CG_Value_r = roundf((CG_Value_t - TempOffset) / 0.05f) *
+                  0.05f * (float)left_And_Righe_Status;
+-    if (!(CG_Value_r >= -CG_MAX_MEASURE_MM &&
+-          CG_Value_r <= CG_MAX_MEASURE_MM))
+-    {
+-        CG_Result_Status = CG_RESULT_RANGE_ERROR;
+-        CG_Value_r = 0.0f;
+-        return 0.0f;
+-    }
+     CG_Result_Status = CG_RESULT_OK;
+     return CG_Value_r;
+ }
+ 
+ 
+--- CG32/STM32L151/Software/src/App_code.c
++++ CG33/STM32L151/Software/src/App_code.c
+@@ -96,12 +96,10 @@
+                 else
+                     snprintf(buffer,sizeof(buffer),"%+06.1f",CG_Value);
+             }
+             else if (state == CG_RESULT_CAL_ERROR)
+                 snprintf(buffer,sizeof(buffer),"CAL ERROR");
+-            else if (state == CG_RESULT_RANGE_ERROR)
+-                snprintf(buffer,sizeof(buffer),"CG RANGE");
+             else if (state == CG_RESULT_TEMP_ERROR)
+                 snprintf(buffer,sizeof(buffer),"TEMP ERR");
+             else if (state == CG_RESULT_EEP_ERROR)
+                 snprintf(buffer,sizeof(buffer),"EEP ERR");
+             else
+--- CG32/STM32L151/Software/inc/algorithm_head.h
++++ CG33/STM32L151/Software/inc/algorithm_head.h
+@@ -10,11 +10,10 @@
+ 
+ /* [CGFIX-01] Rebuild the CG coefficients after EEPROM load or calibration.
+  * [CG32-03] An invalid reading returns 0 but must NEVER be shown as 0 mm. */
+ #define CG_RESULT_OK           0U
+ #define CG_RESULT_CAL_ERROR    1U
+-#define CG_RESULT_RANGE_ERROR  2U
+ #define CG_RESULT_TEMP_ERROR   3U
+ #define CG_RESULT_NO_SENSOR    4U
+ #define CG_RESULT_EEP_ERROR    5U
+ extern volatile uint8_t CG_Result_Status;
+ void CG_Data_Init(void);
+--- CG32/STM32L151/Software/inc/cg_cal_guard.h
++++ CG33/STM32L151/Software/inc/cg_cal_guard.h
+@@ -7,11 +7,10 @@
+  * The factory spans are approximately 12446 / 12463 AD. 4000 AD is a
+  * conservative guard against slopes that could show thousands of mm.
+  * These values are provisional pending real sensor characterization. */
+ #define CG_MIN_180MM_SPAN_AD  4000L
+ #define CG_MAX_ZERO_GAP_AD   1500L
+-#define CG_MAX_MEASURE_MM     240.0f
+ 
+ static uint8_t CG_Calibration_Sane(const CG_Calibration_Param_Str *p)
+ {
+     int32_t left_span, right_span, zero_gap;
+     if (p == 0) return 0U;
+--- CG32/CG_FIX_HOST_TESTS/test_cg.py
++++ CG33/CG_FIX_HOST_TESTS/test_cg.py
+@@ -21,12 +21,12 @@
+ assert 'B3_Eeprom_Boot_OK = Eep_Data_Get();' in main
+ assert main.index('B3_Eeprom_Boot_OK = Eep_Data_Get();') < main.index('CG_Data_Init();')
+ assert main.count('CG_Data_Init();') == 1
+ assert 'CG_Param = c->cg;' in eep and 'B3_CalibrationToGlobals(new_data);' in eep
+ assert 'CG_Display_Status_History != state' in display
+-assert 'CG_Result_Status' in display and 'CG RANGE' in display
+-assert 'CG_MAX_MEASURE_MM' in algo and 'CG_Calibration_Sane' in algo
++assert 'CG_Result_Status' in display and 'CG RANGE' not in display
++assert 'CG_MAX_MEASURE_MM' not in algo and 'CG_Calibration_Sane' in algo
+ assert 'if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)' in display
+ assert 'Main_Values_Need_Redraw = 1U;' in display
+ assert 'Main_Values_Need_Redraw = 0U;' in display
+ cg_section = display[display.index('void CG_Calibration_Page_Reflash(void)'):display.index('void GJ_Calibration_Page_Init(void)')]
+ case8 = cg_section.split('        case 8:', 1)[1].split('        case 9:', 1)[0]
+@@ -59,11 +59,10 @@
+ extern CG_Calibration_Param_Str CG_Param;
+ extern GJ_Calibration_Param_Str GJ_Param;
+ extern int8_t left_And_Righe_Status;
+ #define CG_RESULT_OK 0U
+ #define CG_RESULT_CAL_ERROR 1U
+-#define CG_RESULT_RANGE_ERROR 2U
+ #define CG_RESULT_TEMP_ERROR 3U
+ extern volatile uint8_t CG_Result_Status;
+ extern float POWER_Vol, GJ_Value;
+ void CG_Data_Init(void);
+ float Get_CG_Value(int16_t CG_Ad, float temp);
+@@ -114,15 +113,17 @@
+   CG_Param.temp=23;
+   CG_Data_Init();
+   assert(fabsf(Get_CG_Value(25,23))<0.001f);
+   assert(CG_Result_Status == CG_RESULT_OK);
+   assert(fabsf(Get_CG_Value(25,25)-0.10f)<0.06f);
+-  assert(Get_CG_Value(-30000,23)==0.0f);
+-  assert(CG_Result_Status == CG_RESULT_RANGE_ERROR);
++  assert(Get_CG_Value(-30000,23)>400.0f);
++  assert(CG_Result_Status == CG_RESULT_OK);
++  assert(Get_CG_Value(30000,23)<-400.0f);
++  assert(CG_Result_Status == CG_RESULT_OK);
+   assert(Get_CG_Value(100,105)==0.0f);
+   assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
+-  puts("CG math: PASS; startup/invalid spans/range, endpoints, temp reference");
++  puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference");
+   return 0;
+ }
+ ''')
+     func = extract_c_function(key, 'void CG_Calibration_Storage(void)')
+     (d / 'test_key.c').write_text(r'''

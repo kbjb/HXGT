@@ -1,0 +1,1085 @@
+--- a/QINGJIAOBAN/USER/main.c
++++ b/QINGJIAOBAN/USER/main.c
+@@ -144,10 +144,13 @@
+ #define ADS1110_BUFFER_SIZE 50
+ #define ADC161_BUFFER_SIZE  30
+ 
+ 
+-uint8_t     send_en                                 = 0;
+-uint16_t    send_cnt                                = 0;
++volatile uint8_t  send_en                           = 0; /* [B2] SysTick -> main */
++volatile uint16_t send_cnt                           = 0; /* [B2] 1 ms tick */
++volatile uint32_t uart1_ack_ok_count                  = 0; /* [B2] diagnostic */
++volatile uint32_t uart1_ack_error_count               = 0; /* [B2] diagnostic */
++volatile uint32_t uart1_ack_bad_count                 = 0; /* [B2] malformed ACK */
+ uint8_t     ads1110_cnt                             = 0;
+ uint16_t    ads1110_buffer[ADS1110_BUFFER_SIZE];
+ uint8_t     adc161_cnt                              = 0;
+ int16_t     adc161_buffer[ADC161_BUFFER_SIZE];
+@@ -279,19 +282,19 @@
+                ubuffer[0] == 0x5A && ubuffer[1] == 0x05 &&
+                ubuffer[5] == 0x0D && ubuffer[6] == 0x0A &&
+                ubuffer[4] == getAdd(ubuffer,4))
+             {
+-                if((ubuffer[2] == 0x4F && ubuffer[3] == 0x4B) ||
+-                   (ubuffer[2] == 0x00 && ubuffer[3] == 0x00))
+-                    send_en = 1;
++                if (ubuffer[2] == 0x4F && ubuffer[3] == 0x4B)
++                    uart1_ack_ok_count++; /* [B2] ACK never triggers immediate TX. */
++                else
++                    uart1_ack_error_count++;
+             }
+             usart1_str.rx_ok = 0;
+         }
+         // Transmit sensor frame (original 13-byte protocol retained).
+         if(send_en == 1)
+         {
+-            send_cnt = 0;
+-            send_en  = 0;
++            send_en  = 0; /* [B2] SysTick is the sole TX scheduler. */
+             FToI fToI;
+             UToI uToI;
+             uint8_t buffer[13] = {0x5A};
+             buffer[2] = (ads1110_aver>>8)&0xFF;
+@@ -318,65 +321,52 @@
+ 
+ 
+ 
+ 
++/* [B2] USART1 RX IRQ: read DR exactly once, then assemble ONLY the
++ * existing seven-byte ACK: 5A 05 AA BB CHECK 0D 0A. No blocking TX here. */
+ void USART1_IQRN(USATR_STR *usart_str)
+ {
+-    static uint8_t step = 0;
+     uint8_t c;
+-    if(USART_GetITStatus(usart_str->usart, USART_IT_RXNE) != RESET)
+-    {
+-        /* [B1] Always read DR once to acknowledge RXNE, even if a frame is pending. */
+-        c = (uint8_t)USART_ReceiveData(usart_str->usart);
+-        if(usart_str->rx_ok == 0)
+-        {
+-            /* [B1] Drop an overlength frame and wait for a new 0x5A. */
+-            if(usart_str->rx_i >= USART_RX_LEN)
++    if (USART_GetITStatus(usart_str->usart, USART_IT_RXNE) == RESET) return;
++    c = (uint8_t)USART_ReceiveData(usart_str->usart);
++    if (usart_str->rx_ok) return; /* Foreground owns the complete ACK buffer. */
++    /* [B2] A fresh 0x5A resynchronizes even after a truncated/noisy ACK.
++     * Valid OK/status ACKs from this protocol never contain 0x5A later. */
++    if (c == 0x5A)
++    {
++        usart_str->rx_buffer[0] = c;
++        usart_str->rx_i = 1;
++        return;
++    }
++    if (usart_str->rx_i == 0) return;
++    if (usart_str->rx_i == 1)
++    {
++        if (c != 0x05)
++        {
++            uart1_ack_bad_count++; /* [B2] Invalid ACK length marker. */
++            usart_str->rx_i = 0;
++            if (c == 0x5A)
+             {
+-                usart_str->rx_i = 0;
+-                step = 0;
++                usart_str->rx_buffer[0] = c;
++                usart_str->rx_i = 1;
+             }
+-            if(step == 0)
+-            {
+-                if(c == 0x5A)
+-                {
+-                    usart_str->rx_buffer[0] = c;
+-                    usart_str->rx_i = 1;
+-                    step = 1;
+-                }
+-            }
+-            else
+-            {
+-                /* rx_i is checked before every write. */
+-                usart_str->rx_buffer[usart_str->rx_i++] = c;
+-                if(step == 1)
+-                {
+-                    if(c == 0x0D)
+-                        step = 2;
+-                }
+-                else if(step == 2)
+-                {
+-                    if(c == 0x0A)
+-                    {
+-                        usart_str->rx_len = usart_str->rx_i;
+-                        usart_str->rx_i = 0;
+-                        usart_str->rx_ok = 1;
+-                        step = 0;
+-                    }
+-                    else
+-                    {
+-                        /* [B1] Bad tail: allow a new start byte immediately. */
+-                        usart_str->rx_i = 0;
+-                        step = 0;
+-                        if(c == 0x5A)
+-                        {
+-                            usart_str->rx_buffer[0] = c;
+-                            usart_str->rx_i = 1;
+-                            step = 1;
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-    USART_ClearFlag(usart_str->usart, USART_IT_RXNE);
+-}
++            return;
++        }
++    }
++    /* ACK is never longer than seven bytes; no 64-byte unbounded scan. */
++    if (usart_str->rx_i < 7U)
++        usart_str->rx_buffer[usart_str->rx_i++] = c;
++    if (usart_str->rx_i == 7U)
++    {
++        if (usart_str->rx_buffer[5] == 0x0D &&
++            usart_str->rx_buffer[6] == 0x0A &&
++            usart_str->rx_buffer[4] == getAdd(usart_str->rx_buffer, 4))
++        {
++            usart_str->rx_len = 7;
++            usart_str->rx_ok = 1;
++        }
++        else
++            uart1_ack_bad_count++; /* [B2] Invalid tail/checksum. */
++        usart_str->rx_i = 0;
++    }
++}
+--- a/QINGJIAOBAN/USER/main_head.h
++++ b/QINGJIAOBAN/USER/main_head.h
+@@ -11,9 +11,10 @@
+ #include "math.h"
+ 
+ #include "data_head.h"
+ 
+-#define VERSION "1.0.1"
++#define VERSION "1.0.2" /* [B2] UART protocol reliability update. */
++#define SENSOR_SEND_PERIOD_MS 500U /* [B2] 2Hz sensor reports, independent of ACK. */
+ 
+ 
+ 
+ 
+--- a/QINGJIAOBAN/USER/stm32f10x_it.c
++++ b/QINGJIAOBAN/USER/stm32f10x_it.c
+@@ -134,11 +134,15 @@
+   */
+ 
+ void SysTick_Handler(void)
+ {
+-    usart1_str.sysRec(&usart1_str);
+-    if((send_cnt++) == 500)
++    /* [B2] The ACK parser is fixed-length and does not use idle-time rx_ok.
++     * A periodic scheduler avoids ACK-driven TX/ACK loops. */
++    if (++send_cnt >= SENSOR_SEND_PERIOD_MS)
++    {
++        send_cnt = 0;
+         send_en = 1;
++    }
+ }
+ 
+ /******************************************************************************/
+ /*                 STM32F10x Peripherals Interrupt Handlers                   */
+--- a/STM32L151/Core/Src/main.c
++++ b/STM32L151/Core/Src/main.c
+@@ -133,8 +133,11 @@
+   /* Infinite loop */
+   /* USER CODE BEGIN WHILE */
+   while (1)
+   {
++      /* [B2] Process complete UART packets in foreground. Never parse or TX in ISR. */
++      UART_Process_Received(UART1_ID);
++      UART_Process_Received(UART2_ID);
+       Agreement_Ack_For_Fun();//轨距尺上位机协议处理
+       
+       
+       if(U2_PC_Work_Mode == 1)
+--- a/STM32L151/Core/Src/stm32l1xx_it.c
++++ b/STM32L151/Core/Src/stm32l1xx_it.c
+@@ -220,14 +220,15 @@
+   */
+ void USART1_IRQHandler(void)
+ {
+   /* USER CODE BEGIN USART1_IRQn 0 */
+-    if(__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE)) {
+-        UART_IDLE_IRQHandler(&huart1);
+-    }
++    /* [B2] HAL must drain RXNE before IDLE clear (IDLE clear reads SR/DR). */
+   /* USER CODE END USART1_IRQn 0 */
+   HAL_UART_IRQHandler(&huart1);
+   /* USER CODE BEGIN USART1_IRQn 1 */
++  /* [B2] After HAL_RXNE, clear IDLE and discard incomplete packet only. */
++  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE))
++      UART_IDLE_IRQHandler(&huart1);
+ 
+   /* USER CODE END USART1_IRQn 1 */
+ }
+ 
+@@ -236,14 +237,15 @@
+   */
+ void USART2_IRQHandler(void)
+ {
+   /* USER CODE BEGIN USART2_IRQn 0 */
+-    if(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE)) {
+-        UART_IDLE_IRQHandler(&huart2);
+-    }
++    /* [B2] Drain RXNE before clearing IDLE flag. */
+   /* USER CODE END USART2_IRQn 0 */
+   HAL_UART_IRQHandler(&huart2);
+   /* USER CODE BEGIN USART2_IRQn 1 */
++  /* [B2] After HAL_RXNE, clear IDLE and discard incomplete packet only. */
++  if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE))
++      UART_IDLE_IRQHandler(&huart2);
+ 
+   /* USER CODE END USART2_IRQn 1 */
+ }
+ 
+--- a/STM32L151/Software/inc/agreement_head.h
++++ b/STM32L151/Software/inc/agreement_head.h
+@@ -60,8 +60,11 @@
+ void Agreement_Ack_For_Uart1(uint8_t uart_id,uint8_t* data, uint16_t length);
+ void Agreement_Ack_For_Uart2(uint8_t uart_id,uint8_t* data, uint16_t length);
+ 
+ void Agreement_Ack_For_Fun(void);
++/* [B2] Fresh if a correctly checked sensor frame was received in last 1.5s. */
++#define SENSOR_LINK_TIMEOUT_MS 1500U /* [B2] Three 500ms report periods. */
++uint8_t Sensor_Data_Is_Fresh(void);
+ 
+ 
+ 
+ #endif
+--- a/STM32L151/Software/inc/usart_head.h
++++ b/STM32L151/Software/inc/usart_head.h
+@@ -15,11 +15,18 @@
+     UART_HandleTypeDef *huart;
+     
+     // 接收缓冲区
+     uint8_t  rx_buffer[UART_RX_BUFFER_SIZE];
+-    uint16_t rx_index;
+-    uint8_t  frame_ready;
+-    uint16_t frame_length;
++    volatile uint16_t rx_index;
++    uint16_t expected_length;              /* [B2] Protocol length, not idle gap. */
++    uint8_t  rx_byte;                       /* [B2] HAL one-byte staging. */
++    volatile uint8_t rx_armed;
++    uint8_t  frame_buffer[UART_RX_BUFFER_SIZE]; /* [B2] Foreground mailbox. */
++    volatile uint8_t frame_ready;
++    volatile uint16_t frame_length;
++    volatile uint32_t bad_frame_count;
++    volatile uint32_t dropped_frame_count;
++    volatile uint32_t error_count;
+     
+     // 发送缓冲区
+     uint8_t  tx_buffer[UART_TX_BUFFER_SIZE];
+     uint16_t tx_head;
+@@ -40,8 +47,13 @@
+ 
+ // 函数声明
+ 
+ void     UART_Init(void);
++/* [B2] Run from main loop, NEVER from UART IRQ. */
++void     UART_Process_Received(UART_ID_t uart_id);
++uint32_t UART_Get_Bad_Frame_Count(UART_ID_t uart_id);
++uint32_t UART_Get_Dropped_Frame_Count(UART_ID_t uart_id);
++uint32_t UART_Get_Error_Count(UART_ID_t uart_id);
+ void     UART_Manager_Init(UART_ID_t usart_id);
+ void     UART_Start_Receive(UART_ID_t uart_id);
+ void     UART_Send_Data(UART_ID_t uart_id, uint8_t* data, uint16_t length);
+ uint8_t  UART_Is_Frame_Ready(UART_ID_t uart_id);
+--- a/STM32L151/Software/src/agreement_code.c
++++ b/STM32L151/Software/src/agreement_code.c
+@@ -2,8 +2,19 @@
+ #include "param_head.h"
+ #include "usart_head.h"
+ #include "App_Eep.h"
+ #include "at24c512_head.h"
++/* [B2] Link freshness is separate from the last displayed measurement.
++ * Do not overwrite calibration or measurement values on timeout. */
++static volatile uint32_t Sensor_Last_Valid_Tick = 0;
++static volatile uint8_t Sensor_Frame_Seen = 0;
++
++uint8_t Sensor_Data_Is_Fresh(void)
++{
++    return (uint8_t)(Sensor_Frame_Seen &&
++        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) < SENSOR_LINK_TIMEOUT_MS);
++}
++
+ int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
+ {
+     UToI uToi_Temp;
+     uToi_Temp.uinf = data;
+@@ -49,11 +60,16 @@
+     if(data[1] != (length-3))
+         return 1;
+     if(data[length-3] != Get_Add_Verify(data,length-3))
+         return 2;
+-    GJ_Ad = (data[2]<<8)+data[3];
+-    CG_Ad = Unsigned_Six_To_Signed_Six(((data[4]<<8)+data[5]));
+-    Temp  = Unsigned_Six_To_Float(((data[6]<<24)+(data[7]<<16)+(data[8]<<8)+data[9]));
++    /* [B2] Shift unsigned 32-bit fields, avoiding signed-shift UB. */
++    GJ_Ad = (uint16_t)(((uint16_t)data[2] << 8) | data[3]);
++    CG_Ad = Unsigned_Six_To_Signed_Six((uint16_t)(((uint16_t)data[4] << 8) | data[5]));
++    Temp  = Unsigned_Six_To_Float(((uint32_t)data[6] << 24) |
++                                  ((uint32_t)data[7] << 16) |
++                                  ((uint32_t)data[8] << 8) | (uint32_t)data[9]);
++    Sensor_Last_Valid_Tick = HAL_GetTick();
++    Sensor_Frame_Seen = 1;
+     return 3;
+ }
+ 
+ void Agreement_Ack_For_Uart1(uint8_t uart_id,uint8_t* data, uint16_t length)
+@@ -72,9 +88,9 @@
+     }
+     Tx_Buffer[4] = Get_Add_Verify((uint8_t *)Tx_Buffer,4);
+     UART_Send_Data((UART_ID_t)uart_id,(uint8_t*)Tx_Buffer,7);
+     
+-    UART_Start_Receive((UART_ID_t)uart_id);
++    /* [B2] Receiver stays armed; UART_Process_Received frees its mailbox. */
+ }
+ 
+ 
+ 
+@@ -138,20 +154,27 @@
+     Number = (temp<<8)&0xFF00;
+     AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+     Number += temp&0x00FF;
+     //判断参数是否合法
+-    if(Index > Number)
+-        return 0;
++    if(Index >= Number || Index >= MAX_INDEX_ADDR)
++        return 0; /* [B2] 0-based records; reject untrusted indexes. */
+     //读取数据并存入节点中
+-    Eep_Output_Node(Index,AgreementParam->CmdBuffer+AgreementParam->DataOffset);
++    /* [B2] Echo the two-byte record index, then append the 15-byte node. */
++    if ((uint32_t)AgreementParam->DataOffset + 2U + sizeof(EEP_NODE) + 3U >
++        AgreementParam->BufferSize) return 0;
++    if (Eep_Output_Node(Index, AgreementParam->CmdBuffer+
++            AgreementParam->DataOffset+2U) != 0)
++        return 0; /* [B2] Reject unreadable record. */
+     //更改数据量
+     AgreementParam->dataNumber += sizeof(EEP_NODE);
+     return 1;
+ }
+ 
+ uint8_t UART2_PC_Clear_Eep(AGREEMEN_PARAM * AgreementParam)
+ {
+-    return 1;
++    /* [B2] Not implemented until the EEPROM address layout is repaired. */
++    (void)AgreementParam;
++    return 0;
+ }
+ 
+ uint8_t UART2_PC_Get_Eep_Number(AGREEMEN_PARAM * AgreementParam)
+ {
+@@ -177,16 +200,19 @@
+ }
+ uint8_t UART2_PC_Get_All_Eep(AGREEMEN_PARAM * AgreementParam)
+ {
+     uint8_t  temp = 0;
+-    uint16_t number = 0,addr = 0,size;
++    uint16_t number = 0, size;
+     uint32_t sum = 0;
+     //获取节点个数
+     AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START,&temp);
+     number = (temp<<8)&0xFF00;
+     AT24C512_ReadByte(NODE_INPUT_NUM_ADDR_START+1,&temp);
+-    number = (temp)&0x00FF;
+-    size = number*sizeof(EEP_NODE);
++    number |= (uint16_t)(temp & 0x00FF); /* [B2] Keep high byte. */
++    /* [B2] Guard corrupted EEPROM counters before potentially long TX. */
++    if (number > MAX_INDEX_ADDR ||
++        (uint32_t)number * sizeof(EEP_NODE) > 65535UL) return 0;
++    size = (uint16_t)((uint32_t)number * sizeof(EEP_NODE));
+     //和
+     sum+=0x5A;
+     sum+=AgreementParam->cmd;
+     sum+=(size>>8)&0xFF;
+@@ -200,9 +226,10 @@
+     //发送数据
+     for(uint16_t i=0;i<number;i++)
+     {
+         //获取存储节点数据
+-        Eep_Output_Node(i,AgreementParam->CmdBuffer);
++        if (Eep_Output_Node(i, AgreementParam->CmdBuffer) != 0)
++            return 0; /* [B2] Stop streaming on read failure. */
+         //累加存储节点数据值
+         for(uint8_t j=0;j<sizeof(EEP_NODE);j++)
+             sum += AgreementParam->CmdBuffer[j];
+         //发送存储节点数据
+@@ -224,70 +251,64 @@
+ 
+ 
+ 
+ 
+-void Agreement_Ack_For_Uart2(uint8_t uart_id,uint8_t* data, uint16_t length)
+-{
+-    /* [B1] Ignore unusable frames before reading fixed offsets. */
+-    if(uart_id != UART2_ID || data == NULL || length < 7 || length > UART_RX_BUFFER_SIZE)
+-    {
+-        UART_Start_Receive(UART2_ID);
+-        return;
+-    }
+-    CmdParam.uart_id    = UART2_ID;
+-    CmdParam.CmdBuffer  = data;
+-    CmdParam.BufferSize = length;
+-    CmdParam.dataNumber = 0;
++/* [B2] Validate command and its exact request payload before dispatch.
++ * This callback runs in the main loop (not in USART IRQ). The pending
++ * manager mailbox is valid throughout the synchronous response. */
++void Agreement_Ack_For_Uart2(uint8_t uart_id, uint8_t *data, uint16_t length)
++{
++    uint16_t data_len, i;
++    uint16_t sum = 0;
++    uint8_t response = 0x80;
++    uint16_t required_len = 0;
++    uint8_t supported = 1;
++
++    if (uart_id != UART2_ID || data == NULL || length < 7 ||
++        length > UART_RX_BUFFER_SIZE) return;
++    data_len = (uint16_t)(((uint16_t)data[2] << 8) | data[3]);
++    if (data[0] != 0x5A || (uint32_t)data_len + 7U != length ||
++        data[length - 2U] != 0x0D || data[length - 1U] != 0x0A) return;
++    for (i = 0; i < length - 3U; ++i) sum = (uint16_t)(sum + data[i]);
++    if ((uint8_t)sum != data[length - 3U]) return;
++
++    /* No persistent command pointer is needed after the response completes. */
++    CmdParam.uart_id = UART2_ID;
++    CmdParam.CmdBuffer = data;
++    CmdParam.BufferSize = UART_RX_BUFFER_SIZE;
+     CmdParam.DataOffset = 4;
+-    //检测帧头和帧尾
+-    if(data[0] != 0x5A || data[length-2]!=0x0D || data[length-1]!=0x0A)
+-    {
+-        CmdParam.cmd = 0x80; /* [B1] Error response; do not parse invalid offsets. */
+-        return;
+-    }
+-    //检测数据长度
+-    if((((data[2]<<8)+data[3])+7) != length)
++    CmdParam.dataNumber = data_len;
++
++    switch (data[1])
++    {
++        case UART2_PC_HANDSHAKE:        response = UART2_PC_HANDSHAKE_ACK; break;
++        case UART2_PC_READ_PASSWORD:    response = UART2_PC_READ_PASSWORD_ACK; break;
++        case UART2_PC_WRITE_PASSWORD:   response = UART2_PC_WRITE_PASSWORD_ACK; required_len = 4; break;
++        case UART2_PC_READ_EEP_DATA:    response = UART2_PC_READ_EEP_DATA_ACK; required_len = 2; break;
++        case UART2_PC_CLEAR_EEP_DATA:   response = UART2_PC_CLEAR_EEP_DATA_ACK; break;
++        case UART2_PC_GET_EEP_NUM_DATA: response = UART2_PC_GET_EEP_NUM_DATA_ACK; break;
++        case UART2_PC_CHANGE_DATA_MODE: response = UART2_PC_CHANGE_DATA_MODE_ACK; required_len = 1; break;
++        case UART2_PC_GET_ALL_EEP_DATA: response = UART2_PC_GET_ALL_EEP_DATA_ACK; break;
++        default: supported = 0; break;
++    }
++    if (!supported)
+     {
+         CmdParam.cmd = 0x80;
+-        return;
+-    }
+-    //检测数据校验
+-    //生成校验
+-    switch(data[1])
+-    {
+-        case UART2_PC_HANDSHAKE:
+-            CmdParam.cmd = UART2_PC_HANDSHAKE_ACK;
+-            break;
+-        case UART2_PC_READ_PASSWORD:
+-            CmdParam.cmd = UART2_PC_READ_PASSWORD_ACK;
+-            break;
+-        case UART2_PC_WRITE_PASSWORD:
+-            CmdParam.dataNumber = (data[2]<<8)+data[3];
+-            CmdParam.DataOffset = 4;
+-            CmdParam.cmd = UART2_PC_WRITE_PASSWORD_ACK;
+-            break;
+-        case UART2_PC_READ_EEP_DATA:
+-            CmdParam.dataNumber = (data[2]<<8)+data[3];
+-            CmdParam.DataOffset = 4;
+-            CmdParam.cmd = UART2_PC_READ_EEP_DATA_ACK;
+-            break;
+-        case UART2_PC_CLEAR_EEP_DATA:
+-            CmdParam.cmd = UART2_PC_CLEAR_EEP_DATA_ACK;
+-        case UART2_PC_GET_EEP_NUM_DATA:
+-            CmdParam.cmd = UART2_PC_GET_EEP_NUM_DATA_ACK;
+-            break;
+-        case UART2_PC_CHANGE_DATA_MODE:
+-            CmdParam.dataNumber = (data[2]<<8)+data[3];
+-            CmdParam.DataOffset = 4;
+-            CmdParam.cmd = UART2_PC_CHANGE_DATA_MODE_ACK;
+-            break;
+-        case UART2_PC_GET_ALL_EEP_DATA:
+-            CmdParam.cmd = UART2_PC_GET_ALL_EEP_DATA_ACK;
+-            break;
+-        default:
+-            CmdParam.cmd = 0x80; /* [B1] Unsupported command must be consumed. */
+-            break;
+-    }
++        CmdParam.dataNumber = 0;
++    }
++    else if (data_len != required_len)
++    {
++        /* [B2] Reject mismatched command lengths before any EEPROM write. */
++        CmdParam.cmd = (uint8_t)(response | 0x40U);
++        CmdParam.dataNumber = 0;
++    }
++    else
++    {
++        CmdParam.cmd = response;
++    }
++    /* [B2] The handler is synchronous and foreground-only. Avoid retaining
++     * pointers into the released single-frame RX mailbox. */
++    Agreement_Ack_For_Fun();
+ }
+ 
+ void Agereement_Reset_CmdParam(AGREEMEN_PARAM * AgreementParam)
+ {
+@@ -315,13 +336,12 @@
+     /* [B1] A command may only run when a real UART2 frame supplied a buffer. */
+     if(CmdParam.CmdBuffer == NULL || CmdParam.BufferSize < 7 ||
+        CmdParam.BufferSize > UART_RX_BUFFER_SIZE || CmdParam.uart_id != UART2_ID)
+     {
+-        UART_Start_Receive(UART2_ID);
++        /* [B2] Transport continues independent of command state. */
+         Agereement_Reset_CmdParam(&CmdParam);
+         return;
+     }
+-    uint32_t Sum = 0;
+     switch(CmdParam.cmd)
+     {
+         case UART2_PC_HANDSHAKE_ACK:
+             CmdParam.dataNumber = 0;
+@@ -343,8 +363,11 @@
+                 CmdParam.dataNumber = 0;
+             }
+             break;
+         case UART2_PC_CLEAR_EEP_DATA_ACK:
++            /* [B2] Existing clear command has no implementation; refuse
++             * to report success. EEPROM layout is explicitly out of scope. */
++            CmdParam.cmd |= (1U << 6);
+             CmdParam.dataNumber = 0;
+             break;
+         case UART2_PC_GET_EEP_NUM_DATA_ACK:
+             UART2_PC_Get_Eep_Number(&CmdParam);
+@@ -356,19 +379,21 @@
+                 CmdParam.dataNumber = 0;
+             }
+             break;
+         case UART2_PC_GET_ALL_EEP_DATA_ACK:
+-            UART2_PC_Get_All_Eep(&CmdParam);
+-            goto Uart_Rest;
++            if (UART2_PC_Get_All_Eep(&CmdParam) != 0)
++                goto Uart_Rest;
++            CmdParam.cmd |= (1U << 6);
++            CmdParam.dataNumber = 0;
+             break;
+         default:
+             CmdParam.dataNumber = 0; /* [B1] Unknown/error command has no payload. */
+             break;
+     }
+     
+     //帧头
+     /* [B1] The ordinary reply uses the RX buffer and UART TX size limit. */
+-    if((uint32_t)CmdParam.dataNumber + 7U > UART_RX_BUFFER_SIZE ||
++    if((uint32_t)CmdParam.dataNumber + 7U > CmdParam.BufferSize ||
+        (uint32_t)CmdParam.dataNumber + 7U > UART_TX_BUFFER_SIZE)
+     {
+         CmdParam.cmd = 0x80;
+         CmdParam.dataNumber = 0;
+@@ -386,9 +411,9 @@
+     CmdParam.CmdBuffer[CmdParam.dataNumber+6] = 0x0A;
+     //发送数据
+     UART_Send_Data((UART_ID_t)CmdParam.uart_id,(uint8_t*)CmdParam.CmdBuffer,CmdParam.dataNumber+7);
+     Uart_Rest:
+-    UART_Start_Receive((UART_ID_t)CmdParam.uart_id);
++    /* [B2] No HAL reception abort between packets. */
+     //复位参数
+     Agereement_Reset_CmdParam(&CmdParam);
+ }
+ 
+--- a/STM32L151/Software/src/usart_code.c
++++ b/STM32L151/Software/src/usart_code.c
+@@ -1,237 +1,275 @@
+ #include "usart_head.h"
+-
+-// 串口管理器实例
++#include <string.h>
++
++/* [B1] UART3 remains disabled: only USART1/2 exist in the active board. */
++/* [B2] ISR collects bytes into length-framed packets; application callbacks
++ * run ONLY from UART_Process_Received() in the main loop. The live RX buffer
++ * and the completed-frame mailbox are separate to avoid pointer reuse. */
+ static UART_Manager_t uart_managers[UART_MAX];
+-
+-// 外部串口句柄声明
+ extern UART_HandleTypeDef huart1;
+ extern UART_HandleTypeDef huart2;
+-/* [B1] UART3 is not configured in the active project. */
+-
+-
+-
+-void UART_Manager_Init(UART_ID_t usart_id)
+-{
+-    switch(usart_id)
+-    {
+-        case UART1_ID:
+-            // 初始化UART1管理器
+-            uart_managers[usart_id].huart = &huart1;
+-            __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
+-        break;
+-        case UART2_ID:
+-            // 初始化UART2管理器
+-            uart_managers[UART2_ID].huart = &huart2;
+-            __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
+-        break;
+-        case UART3_ID:
+-            /* [B1] Reserved: no USART3 peripheral/handle in this build. */
+-            break;
+-        case UART_MAX:
+-            break;
+-    }
++
++static UART_ID_t UART_B2_Id(const UART_HandleTypeDef *huart)
++{
++    if (huart == NULL) return UART_MAX;
++    if (huart->Instance == USART1) return UART1_ID;
++    if (huart->Instance == USART2) return UART2_ID;
++    return UART_MAX;
++}
++
++static void UART_B2_Reset_Parser(UART_Manager_t *manager)
++{
++    manager->rx_index = 0;
++    manager->expected_length = 0;
++}
++
++static void UART_B2_Arm(UART_Manager_t *manager)
++{
++    if (manager->huart == NULL || manager->rx_armed) return;
++    if (HAL_UART_Receive_IT(manager->huart, &manager->rx_byte, 1) == HAL_OK)
++        manager->rx_armed = 1;
++    else
++        manager->error_count++;
++}
++
++void UART_Manager_Init(UART_ID_t uart_id)
++{
++    UART_Manager_t *manager;
++    if (uart_id >= UART_MAX) return;
++    manager = &uart_managers[uart_id];
++    memset(manager, 0, sizeof(*manager));
++    if (uart_id == UART1_ID) manager->huart = &huart1;
++    else if (uart_id == UART2_ID) manager->huart = &huart2;
++    /* [B1] No UART3 register access. */
++    if (manager->huart != NULL)
++        __HAL_UART_ENABLE_IT(manager->huart, UART_IT_IDLE);
+ }
+ 
+ void UART_Start_Receive(UART_ID_t uart_id)
+ {
+-    if(uart_id >= UART_MAX) return;
+-    
++    UART_Manager_t *manager;
++    if (uart_id >= UART_MAX) return;
++    manager = &uart_managers[uart_id];
++    if (manager->huart == NULL) return;
++    /* [B2] Start/recover reception only. Normal packet completion never
++     * aborts HAL reception or clears a pending application frame. */
++    HAL_UART_AbortReceive(manager->huart);
++    manager->rx_armed = 0;
++    UART_B2_Reset_Parser(manager);
++    UART_B2_Arm(manager);
++}
++
++void UART_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
++{
++    UART_Manager_t *manager;
++    if (uart_id >= UART_MAX || data == NULL || length == 0 ||
++        length > UART_TX_BUFFER_SIZE) return;
++    manager = &uart_managers[uart_id];
++    if (manager->huart == NULL) return;
++    /* [B2] Only called from foreground. Bound a failed TX instead of
++     * indefinitely blocking the main loop with HAL_MAX_DELAY. */
++    if (HAL_UART_Transmit(manager->huart, data, length, 100U) != HAL_OK)
++        manager->error_count++;
++}
++
++uint8_t UART_Is_Frame_Ready(UART_ID_t uart_id)
++{
++    if (uart_id >= UART_MAX) return 0;
++    return uart_managers[uart_id].frame_ready;
++}
++
++uint16_t UART_Get_Frame_Length(UART_ID_t uart_id)
++{
++    if (uart_id >= UART_MAX) return 0;
++    return uart_managers[uart_id].frame_length;
++}
++
++uint8_t* UART_Get_Frame_Data(UART_ID_t uart_id)
++{
++    if (uart_id >= UART_MAX) return NULL;
++    return uart_managers[uart_id].frame_buffer;
++}
++
++void UART_Clear_Frame_Flag(UART_ID_t uart_id)
++{
++    if (uart_id >= UART_MAX) return;
++    uart_managers[uart_id].frame_ready = 0;
++    uart_managers[uart_id].frame_length = 0;
++}
++
++void UART_Register_Frame_Callback(UART_ID_t uart_id,
++        void (*callback)(uint8_t, uint8_t*, uint16_t))
++{
++    if (uart_id >= UART_MAX) return;
++    uart_managers[uart_id].frame_received_callback = callback;
++}
++
++uint32_t UART_Get_Bad_Frame_Count(UART_ID_t uart_id)
++{
++    return uart_id < UART_MAX ? uart_managers[uart_id].bad_frame_count : 0;
++}
++
++uint32_t UART_Get_Dropped_Frame_Count(UART_ID_t uart_id)
++{
++    return uart_id < UART_MAX ? uart_managers[uart_id].dropped_frame_count : 0;
++}
++
++uint32_t UART_Get_Error_Count(UART_ID_t uart_id)
++{
++    return uart_id < UART_MAX ? uart_managers[uart_id].error_count : 0;
++}
++
++static void UART_B2_Consume_Byte(UART_ID_t uart_id, uint8_t c)
++{
+     UART_Manager_t *manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Unconfigured port guard. */
+-    
+-    // 清除接收状态
+-    manager->rx_index = 0;
+-    manager->frame_ready = 0;
+-    manager->frame_length = 0;
+-    memset(manager->rx_buffer, 0, UART_RX_BUFFER_SIZE);
+-    
+-    HAL_UART_AbortReceive_IT(uart_managers[uart_id].huart);
+-    // 启动中断接收[2,3](@ref)
+-    HAL_UART_Receive_IT(manager->huart, &manager->rx_buffer[manager->rx_index], 1);
+-}
+-
+-void UART_Send_Data(UART_ID_t uart_id, uint8_t* data, uint16_t length)
+-{
+-    if(uart_id >= UART_MAX || data == NULL || length == 0) return;
+-    
+-    UART_Manager_t *manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Do not access disabled UART3. */
+-    
+-    if(length <= UART_TX_BUFFER_SIZE)
+-        HAL_UART_Transmit(manager->huart, data, length,HAL_MAX_DELAY);
+-}
+-
+-uint8_t UART_Is_Frame_Ready(UART_ID_t uart_id)
+-{
+-    if(uart_id >= UART_MAX) return 0;
+-    return uart_managers[uart_id].frame_ready;
+-}
+-
+-uint16_t UART_Get_Frame_Length(UART_ID_t uart_id)
+-{
+-    if(uart_id >= UART_MAX) return 0;
+-    return uart_managers[uart_id].frame_length;
+-}
+-
+-uint8_t* UART_Get_Frame_Data(UART_ID_t uart_id)
+-{
+-    if(uart_id >= UART_MAX) return NULL;
+-    return uart_managers[uart_id].rx_buffer;
+-}
+-
+-void UART_Clear_Frame_Flag(UART_ID_t uart_id)
+-{
+-    if(uart_id >=UART_MAX) return;
+-    
+-    UART_Manager_t *manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Disabled UART3 guard. */
+-    manager->frame_ready = 0;
+-    manager->frame_length = 0;
+-    manager->rx_index = 0;
+-    memset(manager->rx_buffer, 0, UART_RX_BUFFER_SIZE);
+-    // 重新开始接收
+-    HAL_UART_Receive_IT(manager->huart, &manager->rx_buffer[manager->rx_index], 1);
+-}
+-
+-void UART_Register_Frame_Callback(UART_ID_t uart_id, void (*callback)(uint8_t, uint8_t*, uint16_t))
+-{
+-    if(uart_id >= UART_MAX) return;
+-    uart_managers[uart_id].frame_received_callback = callback;
+-}
+-
+-// 空闲中断处理函数[6,7,8](@ref)
++    uint16_t i, sum = 0;
++
++    if (manager->rx_index == 0)
++    {
++        if (c != 0x5A) return;
++        manager->rx_buffer[0] = c;
++        manager->rx_index = 1;
++        return;
++    }
++    if (manager->rx_index >= UART_RX_BUFFER_SIZE)
++    {
++        manager->bad_frame_count++;
++        UART_B2_Reset_Parser(manager);
++        return;
++    }
++    manager->rx_buffer[manager->rx_index++] = c;
++
++    if (uart_id == UART1_ID && manager->rx_index == 2)
++    {
++        /* [B2] Sensor frame: 5A 0A + 8 payload + checksum + 0D 0A. */
++        if (c != 0x0A)
++        {
++            manager->bad_frame_count++;
++            UART_B2_Reset_Parser(manager);
++            if (c == 0x5A) { manager->rx_buffer[0] = c; manager->rx_index = 1; }
++            return;
++        }
++        manager->expected_length = 13;
++    }
++    else if (uart_id == UART2_ID && manager->rx_index == 4)
++    {
++        uint16_t data_len = (uint16_t)(((uint16_t)manager->rx_buffer[2] << 8) |
++                                               manager->rx_buffer[3]);
++        if (data_len > UART_RX_BUFFER_SIZE - 7U)
++        {
++            manager->bad_frame_count++;
++            UART_B2_Reset_Parser(manager);
++            return;
++        }
++        manager->expected_length = data_len + 7U;
++    }
++
++    if (manager->expected_length == 0 || manager->rx_index < manager->expected_length)
++        return;
++
++    /* [B2] Full-length frame, tail, and additive checksum are all mandatory
++     * BEFORE either protocol callback can run. Payload CR/LF is not a tail. */
++    if (manager->rx_buffer[manager->expected_length - 2U] != 0x0D ||
++        manager->rx_buffer[manager->expected_length - 1U] != 0x0A)
++    {
++        manager->bad_frame_count++;
++        UART_B2_Reset_Parser(manager);
++        return;
++    }
++    for (i = 0; i < manager->expected_length - 3U; ++i)
++        sum = (uint16_t)(sum + manager->rx_buffer[i]);
++    if ((uint8_t)sum != manager->rx_buffer[manager->expected_length - 3U])
++    {
++        manager->bad_frame_count++;
++        UART_B2_Reset_Parser(manager);
++        return;
++    }
++    if (manager->frame_ready)
++    {
++        /* [B2] A one-frame mailbox is intentionally bounded. Report drop;
++         * NEVER overwrite a frame which the foreground is still processing. */
++        manager->dropped_frame_count++;
++    }
++    else
++    {
++        memcpy(manager->frame_buffer, manager->rx_buffer, manager->expected_length);
++        manager->frame_length = manager->expected_length;
++        manager->frame_ready = 1;
++    }
++    UART_B2_Reset_Parser(manager);
++}
++
+ void UART_IDLE_IRQHandler(UART_HandleTypeDef *huart)
+ {
+-    UART_ID_t uart_id = UART_MAX;
+-    UART_Manager_t *manager = NULL;
+-    
+-    // 确定是哪个串口触发了空闲中断
+-    if(huart->Instance == USART1) {
+-        uart_id = UART1_ID;
+-    } else if(huart->Instance == USART2) {
+-        uart_id = UART2_ID;
+-    } else if(huart->Instance == USART3) {
+-        uart_id = UART3_ID;
+-    } else {
+-        return;
+-    }
+-    
+-    manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Ignore disabled ports. */
+-    
+-    // 检查空闲中断标志[6,8](@ref)
+-    if(__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE)) {
+-        __HAL_UART_CLEAR_IDLEFLAG(huart); // 清除空闲中断标志
+-        
+-        if(manager->rx_index > 0) {
+-            manager->frame_length = manager->rx_index;
+-            manager->frame_ready = 1;
+-            
+-            // 如果有注册回调函数，则调用[3,5](@ref)
+-            if(manager->frame_received_callback != NULL) {
+-                manager->frame_received_callback(uart_id, manager->rx_buffer, manager->frame_length);
+-            }
++    UART_ID_t uart_id = UART_B2_Id(huart);
++    if (uart_id == UART_MAX || uart_managers[uart_id].huart == NULL) return;
++    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE))
++    {
++        __HAL_UART_CLEAR_IDLEFLAG(huart);
++        /* [B2] A gap interrupts a partial frame but does not discard any
++         * completed packet. UART RX remains armed continuously. */
++        if (uart_managers[uart_id].rx_index > 0)
++        {
++            uart_managers[uart_id].bad_frame_count++;
++            UART_B2_Reset_Parser(&uart_managers[uart_id]);
+         }
+-        
+-        // 注意：这里不重新启动接收，由应用层在处理完数据后调用UART_Clear_Frame_Flag来重新启动
+-    }
+-}
+-
+-// 串口接收完成回调函数[1,3](@ref)
++    }
++}
++
+ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+ {
+-    UART_ID_t uart_id = UART_MAX;
+-    UART_Manager_t *manager = NULL;
+-    
+-    // 确定是哪个串口
+-    if(huart->Instance == USART1) {
+-        uart_id = UART1_ID;
+-    } else if(huart->Instance == USART2) {
+-        uart_id = UART2_ID;
+-    } else if(huart->Instance == USART3) {
+-        uart_id = UART3_ID;
+-    } else {
+-        return;
+-    }
+-    
+-    manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Ignore disabled ports. */
+-    // 增加接收索引
+-    manager->rx_index++;
+-    
+-    // 检查缓冲区是否已满
+-    if(manager->rx_index == UART_RX_BUFFER_SIZE) {
+-        manager->rx_index = UART_RX_BUFFER_SIZE-1; // 回绕到缓冲区开头（或根据需求处理缓冲区满的情况）
+-    }
+-    
+-    // 继续接收下一个字节[3,5](@ref)
+-    HAL_UART_Receive_IT(huart, &manager->rx_buffer[manager->rx_index], 1);
+-    
+-
+-}
+-
+-// 串口发送完成回调函数[1,4](@ref)
++    UART_ID_t uart_id = UART_B2_Id(huart);
++    UART_Manager_t *manager;
++    if (uart_id == UART_MAX) return;
++    manager = &uart_managers[uart_id];
++    if (manager->huart != huart) return;
++    manager->rx_armed = 0;
++    UART_B2_Consume_Byte(uart_id, manager->rx_byte);
++    UART_B2_Arm(manager);
++}
++
+ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+ {
+-    UART_ID_t uart_id = UART_MAX;
+-    UART_Manager_t *manager = NULL;
+-    
+-    // 确定是哪个串口
+-    if(huart->Instance == USART1) {
+-        uart_id = UART1_ID;
+-    } else if(huart->Instance == USART2) {
+-        uart_id = UART2_ID;
+-    } else if(huart->Instance == USART3) {
+-        uart_id = UART3_ID;
+-    } else {
+-        return;
+-    }
+-    
+-    manager = &uart_managers[uart_id];
+-    if(manager->huart == NULL) return; /* [B1] Ignore disabled ports. */
+-    manager->tx_busy = 0;
+-}
+-
+-// 错误处理回调[2](@ref)
++    UART_ID_t uart_id = UART_B2_Id(huart);
++    if (uart_id < UART_MAX)
++        uart_managers[uart_id].tx_busy = 0;
++}
++
+ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+ {
+-    // 错误处理，重启接收
+-    UART_ID_t uart_id = UART_MAX;
+-    
+-    if(huart->Instance == USART1) {
+-        uart_id = UART1_ID;
+-    } else if(huart->Instance == USART2) {
+-        uart_id = UART2_ID;
+-    } else if(huart->Instance == USART3) {
+-        uart_id = UART3_ID;
+-    } else {
+-        return;
+-    }
+-    
+-    // 重启接收
++    UART_ID_t uart_id = UART_B2_Id(huart);
++    UART_Manager_t *manager;
++    if (uart_id == UART_MAX) return;
++    manager = &uart_managers[uart_id];
++    if (manager->huart != huart) return;
++    manager->error_count++;
++    /* [B2] Recover from overrun/noise/framing errors. Pending completed
++     * frames remain available to the foreground. */
+     UART_Start_Receive(uart_id);
+ }
+-// 自定义数据接收回调函数
+-/* [B1] Removed unused debug echo callback (unsafe binary-data %s formatting). */
++
++void UART_Process_Received(UART_ID_t uart_id)
++{
++    UART_Manager_t *manager;
++    if (uart_id >= UART_MAX) return;
++    manager = &uart_managers[uart_id];
++    if (manager->huart == NULL) return;
++    if (!manager->rx_armed) UART_B2_Arm(manager);
++    if (!manager->frame_ready) return;
++    /* [B2] No protocol code and no blocking HAL_UART_Transmit in IRQ. */
++    if (manager->frame_received_callback != NULL)
++        manager->frame_received_callback(uart_id, manager->frame_buffer,
++                                         manager->frame_length);
++    UART_Clear_Frame_Flag(uart_id);
++}
+ 
+ void UART_Init(void)
+ {
+     UART_Manager_Init(UART1_ID);
+     UART_Manager_Init(UART2_ID);
+-    /* [B1] UART3 deliberately disabled until its MCU pins and handle are configured. */
+-    
+-    // 注册回调函数
++    /* [B1] UART3 remains reserved and disabled. */
+     UART_Register_Frame_Callback(UART1_ID, Agreement_Ack_For_Uart1);
+     UART_Register_Frame_Callback(UART2_ID, Agreement_Ack_For_Uart2);
+-    
+-    // 启动串口接收
+     UART_Start_Receive(UART1_ID);
+     UART_Start_Receive(UART2_ID);
+-    
+-}
+-
+-
+-
+-
+-
+-
++}

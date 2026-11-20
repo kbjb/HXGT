@@ -1,0 +1,1261 @@
+--- V1.0.3_B3/STM32L151/Software/src/App_Eep.c
++++ V1.0.4_B31/STM32L151/Software/src/App_Eep.c
+@@ -37,9 +37,6 @@
+ 
+ static EEP_STORAGE_STATE cal_state = EEP_STATE_NOT_READY;
+ static EEP_RECORD_STATE record_state = EEP_RECORD_NOT_READY;
+-static uint8_t legacy_warning_mask = 0U;
+-static uint8_t legacy_upgrade_approved = 0U;
+-static uint8_t legacy_record_import_approved = 0U;
+ static int8_t cal_active_slot = -1;
+ static int8_t record_active_slot = -1;
+ static uint32_t cal_sequence = 0U;
+@@ -311,85 +308,87 @@
+ {
+     uint8_t buf[EEP_B3_SLOT_LEN];
+     if (!ValidCal(new_data)) return 0U;
+-    if (cal_state == EEP_STATE_B3_CORRUPT ||
+-        cal_state == EEP_STATE_IO_ERROR ||
+-        cal_state == EEP_STATE_NOT_READY) return 0U;
+-    if (cal_state == EEP_STATE_LEGACY_LOCKED &&
+-        !legacy_upgrade_approved) return 0U;
++    /* A nonblank chip without valid B3 calibration is quarantined. */
++    if (cal_state != EEP_STATE_B3_VALID) return 0U;
+     B3_MakeCal(buf, new_data, cal_sequence + 1U);
+     if (!B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
+                    buf, &cal_active_slot, &cal_sequence)) return 0U;
+     B3_CalibrationToGlobals(new_data);
+     cal_state = EEP_STATE_B3_VALID;
+-    legacy_upgrade_approved = 0U;
+-    return 1U;
+-}
+-
+-static uint8_t B3_LoadLegacy(uint8_t *found)
+-{
+-    uint8_t flag, password_bytes[4], buf[2];
+-    uint8_t pw_ok, cg_ok, gj_ok, ch_ok;
+-    uint32_t candidate_password;
+-    CG_Calibration_Param_Str cg = CG_Param;
+-    GJ_Calibration_Param_Str gj = GJ_Param;
+-    CH_Calibration_Param_Str ch = CH_Param;
+-
+-    *found = 0U;
+-    legacy_warning_mask = 0U;
+-    if (AT24C512_ReadByte(EEP_USE_FLAG_START, &flag) != EEPROM_OK ||
+-        AT24C512_ReadBuffer(EEP_PASSWORD_START, password_bytes, 4U)
+-        != EEPROM_OK) return 0U;
+-    candidate_password = Get32(password_bytes);
+-    pw_ok = (candidate_password <= 999999UL) ? 1U : 0U;
+-
+-    /* [B3] Read the ORIGINAL offsets into STAGED RAM first.
+-     * Legacy temperature writes used inconsistent +3/+4 offsets and
+-     * overlap neighboring ADC data; none of those floats are trusted.
+-     * The old record counter overlaps CH parameters.
+-     */
+-    if (AT24C512_ReadBuffer(CG_LEFT_180_START, buf, 2U) != EEPROM_OK) return 0U;
+-    cg.CG_Max_Left_Ad=GetSigned16(buf);
+-    if (AT24C512_ReadBuffer(CG_LEFT_0_START, buf, 2U) != EEPROM_OK) return 0U;
+-    cg.CG_Zero_Left_Ad=GetSigned16(buf);
+-    if (AT24C512_ReadBuffer(CG_RIGHT_180_START, buf, 2U) != EEPROM_OK) return 0U;
+-    cg.CG_Max_Right_Ad=GetSigned16(buf);
+-    if (AT24C512_ReadBuffer(CG_RIGHT_0_START, buf, 2U) != EEPROM_OK) return 0U;
+-    cg.CG_Zero_Right_Ad=GetSigned16(buf);
+-    cg_ok=ValidCG(&cg);
+-
+-    if (AT24C512_ReadBuffer(GJ_1410_AD_START, buf, 2U) != EEPROM_OK) return 0U;
+-    gj.GJ_1410_Ad=Get16(buf);
+-    if (AT24C512_ReadBuffer(GJ_1435_AD_START, buf, 2U) != EEPROM_OK) return 0U;
+-    gj.GJ_1435_Ad=Get16(buf);
+-    if (AT24C512_ReadBuffer(GJ_1470_AD_START, buf, 2U) != EEPROM_OK) return 0U;
+-    gj.GJ_1470_Ad=Get16(buf);
+-    gj_ok=ValidGJ(&gj);
+-
+-    if (AT24C512_ReadBuffer(CZ_AD_START, buf, 2U) != EEPROM_OK) return 0U;
+-    ch.CZ_Ad=Get16(buf);
+-    if (AT24C512_ReadBuffer(HB_AD_START, buf, 2U) != EEPROM_OK) return 0U;
+-    ch.HB_Ad=Get16(buf);
+-    ch_ok=ValidCH(&ch);
+-
+-    /* A marker or multiple independent, plausible fields can indicate
+-     * legacy content. Unmarked random bytes must not be loaded. */
+-    if (flag == 0xAAU ||
+-        (pw_ok && (cg_ok || gj_ok || ch_ok)) ||
+-        (cg_ok && gj_ok))
+-    {
+-        *found = 1U;
+-        if (pw_ok) Driver_Calibration_Password=candidate_password;
+-        else legacy_warning_mask |= EEP_LEGACY_BAD_PASSWORD;
+-        if (cg_ok) CG_Param=cg;
+-        else legacy_warning_mask |= EEP_LEGACY_BAD_CG;
+-        if (gj_ok) GJ_Param=gj;
+-        else legacy_warning_mask |= EEP_LEGACY_BAD_GJ;
+-        if (ch_ok) CH_Param=ch;
+-        else legacy_warning_mask |= EEP_LEGACY_BAD_CH;
+-        /* [B3] Preserve compiled/default temperatures until an operator
+-         * verifies/recalibrates. No automatic EEPROM migration occurs. */
+-        legacy_warning_mask |= EEP_LEGACY_TEMP_UNCERTAIN;
+-    }
++    return 1U;
++}
++
++/* [B3.1] The production build does not import or decode pre-B3 data.
++ * A new chip is auto-initialized ONLY when the whole 64 KiB array is
++ * erased to 0xFF. Do not infer "factory new" from empty A/B slots.
++ * Result: 1=factory blank, 0=nonblank, 2=I2C/read error.
++ * The scan runs only for a missing/corrupt calibration journal.
++ * It does NOT write to EEPROM.
++ */
++static uint8_t B31_FactoryScan(uint8_t allow_partial_cal_a)
++{
++    uint8_t raw[128];
++    uint8_t expected[EEP_B3_SLOT_LEN];
++    B3_CAL_DATA defaults;
++    uint32_t offset;
++    uint16_t j;
++    uint8_t byte;
++
++    B3_CalibrationFromGlobals(&defaults);
++    if (!ValidCal(&defaults)) return 2U; /* never store invalid defaults */
++    B3_MakeCal(expected, &defaults, 1U);
++
++    for (offset = 0U; offset < EEP_MAX_ADDR; offset += sizeof(raw))
++    {
++        if (AT24C512_ReadBuffer((uint16_t)offset, raw, sizeof(raw))
++            != EEPROM_OK) return 2U;
++        for (j = 0U; j < (uint16_t)sizeof(raw); ++j)
++        {
++            byte = raw[j];
++            if (byte == 0xFFU) continue;
++
++            /* An interrupted first-ever initialization can leave only
++             * the A slot's provisional marker/payload programmed.
++             * Recover it ONLY when every programmed byte matches the
++             * exact factory image (or marker=0), and the rest of the
++             * entire EEPROM is blank. This NEVER enables legacy import.
++             */
++            if (allow_partial_cal_a &&
++                offset + j >= EEP_B3_CAL_SLOT_A &&
++                offset + j < (uint32_t)EEP_B3_CAL_SLOT_A + EEP_B3_SLOT_LEN)
++            {
++                uint16_t pos = (uint16_t)(offset + j - EEP_B3_CAL_SLOT_A);
++                if (pos == 63U && byte == 0U) continue;
++                if (pos < 63U && byte == expected[pos]) continue;
++            }
++            return 0U;
++        }
++    }
++    return 1U;
++}
++
++/* The initializer commits the verified compile-time defaults into both
++ * independent A/B calibration pages. The first commit makes the data
++ * durable; the second creates a redundant backup. Power loss between
++ * them leaves at least one valid copy. Record metadata stays EMPTY (0)
++ * until the first actual append, and is never needlessly rewritten.
++ */
++static uint8_t B31_InitializeFactoryCalibration(void)
++{
++    B3_CAL_DATA defaults;
++    uint8_t snapshot[EEP_B3_SLOT_LEN];
++    uint8_t copy;
++    B3_CalibrationFromGlobals(&defaults);
++    if (!ValidCal(&defaults)) return 0U;
++
++    for (copy = 0U; copy < 2U; ++copy)
++    {
++        B3_MakeCal(snapshot, &defaults, cal_sequence + 1U);
++        if (!B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B,
++                       1U, snapshot, &cal_active_slot, &cal_sequence))
++            return 0U;
++    }
++    cal_state = EEP_STATE_B3_VALID;
+     return 1U;
+ }
+ 
+@@ -397,85 +396,79 @@
+ {
+     uint8_t cal_slot[EEP_B3_SLOT_LEN];
+     uint8_t rec_slot[EEP_B3_SLOT_LEN];
+-    uint8_t result, legacy_found = 0U;
++    uint8_t result, factory;
+     B3_CAL_DATA decoded;
+ 
+-    cal_state=EEP_STATE_IO_ERROR;
+-    record_state=EEP_RECORD_IO_ERROR;
+-    cal_active_slot=-1;
+-    record_active_slot=-1;
+-    cal_sequence=0U;
+-    record_sequence=0U;
+-    record_count=0U;
+-    legacy_upgrade_approved=0U;
+-    legacy_record_import_approved=0U;
+-    legacy_warning_mask=0U;
+-
+-    /* [B3] Absolutely no EEPROM write on boot, including probe. */
++    cal_state = EEP_STATE_IO_ERROR;
++    record_state = EEP_RECORD_IO_ERROR;
++    cal_active_slot = -1;
++    record_active_slot = -1;
++    cal_sequence = 0U;
++    record_sequence = 0U;
++    record_count = 0U;
++
++    /* A read-only probe; a failed probe never becomes an empty-chip test. */
+     if (AT24C512_Init() != EEPROM_OK) return 0U;
+ 
+-    result=B3_FindSlot(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
+-                       cal_slot, &cal_active_slot, &cal_sequence);
++    result = B3_FindSlot(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
++                         cal_slot, &cal_active_slot, &cal_sequence);
+     if (result == 3U) return 0U;
+     if (result == 1U)
+     {
+         B3_ReadCal(cal_slot, &decoded);
+         B3_CalibrationToGlobals(&decoded);
+-        cal_state=EEP_STATE_B3_VALID;
+-    }
+-    else if (result == 2U)
+-    {
+-        /* [B3] Never auto-initialize over an invalid previous journal. */
+-        cal_state=EEP_STATE_B3_CORRUPT;
++        cal_state = EEP_STATE_B3_VALID;
+     }
+     else
+     {
+-        if (!B3_LoadLegacy(&legacy_found)) return 0U;
+-        cal_state=legacy_found ? EEP_STATE_LEGACY_LOCKED :
+-                               EEP_STATE_FACTORY_EMPTY;
+-    }
+-
+-    result=B3_FindSlot(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
+-                       rec_slot, &record_active_slot, &record_sequence);
+-    if (result == 3U) { record_state=EEP_RECORD_IO_ERROR; return 0U; }
++        /* Both A/B blank: accept strictly blank 64KiB only.
++         * Corrupt A/B: allow recovery of the EXACT interrupted first
++         * factory A commit, but never other arbitrary/corrupt data. */
++        factory = B31_FactoryScan((result == 2U) ? 1U : 0U);
++        if (factory == 2U)
++        {
++            cal_state = EEP_STATE_IO_ERROR;
++            return 0U;
++        }
++        if (factory == 0U)
++        {
++            cal_state = (result == 2U) ? EEP_STATE_B3_CORRUPT :
++                                      EEP_STATE_NONBLANK_LOCKED;
++            /* Inspect record status below, without touching EEPROM. */
++        }
++        else
++        {
++            /* State is not marked valid until both writes verify. */
++            cal_state = EEP_STATE_FACTORY_EMPTY;
++            if (!B31_InitializeFactoryCalibration())
++            {
++                cal_state = EEP_STATE_IO_ERROR;
++                return 0U;
++            }
++        }
++    }
++
++    result = B3_FindSlot(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
++                         rec_slot, &record_active_slot, &record_sequence);
++    if (result == 3U) { record_state = EEP_RECORD_IO_ERROR; return 0U; }
+     if (result == 1U)
+     {
+-        record_count=Get16(rec_slot+10);
+-        record_state=EEP_RECORD_B3_VALID;
+-    }
+-    else if (result == 2U) record_state=EEP_RECORD_CORRUPT;
+-    else record_state=EEP_RECORD_EMPTY;
+-
+-    return (cal_state != EEP_STATE_B3_CORRUPT &&
++        record_count = Get16(rec_slot + 10);
++        record_state = EEP_RECORD_B3_VALID;
++    }
++    else if (result == 2U) record_state = EEP_RECORD_CORRUPT;
++    else record_state = EEP_RECORD_EMPTY;
++
++    return (cal_state == EEP_STATE_B3_VALID &&
+             record_state != EEP_RECORD_CORRUPT) ? 1U : 0U;
+ }
+ 
+ EEP_STORAGE_STATE Eep_Get_Storage_State(void) { return cal_state; }
+ EEP_RECORD_STATE Eep_Get_Record_State(void) { return record_state; }
+-uint8_t Eep_Get_Legacy_Warnings(void) { return legacy_warning_mask; }
+-
+-uint8_t Eep_Approve_Legacy_Calibration_Upgrade(void)
+-{
+-    /* Must be explicitly invoked after an external 64KiB backup,
+-     * review of GJ/CG/CH calibration and operator authorization.
+-     * This does NOT modify EEPROM and is reset after reboot/save. */
+-    if (cal_state != EEP_STATE_LEGACY_LOCKED) return 0U;
+-    legacy_upgrade_approved=1U;
+-    return 1U;
+-}
+-
+-uint8_t Eep_Approve_Legacy_Record_Import(void)
+-{
+-    /* [B3] Independent authorization for importing historical records.
+-     * Allowed after a full external backup and independently VERIFIED
+-     * record count, even if calibration was upgraded earlier. */
+-    if (record_state != EEP_RECORD_EMPTY ||
+-        cal_state == EEP_STATE_IO_ERROR ||
+-        cal_state == EEP_STATE_NOT_READY ||
+-        cal_state == EEP_STATE_B3_CORRUPT) return 0U;
+-    legacy_record_import_approved=1U;
+-    return 1U;
+-}
++/* Legacy migration is intentionally removed from the new-product build. */
++uint8_t Eep_Get_Legacy_Warnings(void) { return 0U; }
++uint8_t Eep_Approve_Legacy_Calibration_Upgrade(void) { return 0U; }
++uint8_t Eep_Approve_Legacy_Record_Import(void) { return 0U; }
+ 
+ uint8_t Eep_Save_CG_Calibration(CG_Calibration_Param_Str data)
+ {
+@@ -528,13 +521,15 @@
+ }
+ uint8_t Eep_Write_For_Unsigned32(uint16_t addr, uint32_t data)
+ {
+-    return (addr == EEP_PASSWORD_START) ? Eep_Save_Password(data) : 0U;
++    (void)addr; (void)data;
++    return 0U;
+ }
+ 
+ static uint8_t B3_SaveRecordCount(uint16_t count)
+ {
+     uint8_t buf[EEP_B3_SLOT_LEN];
+-    if (count > MAX_INDEX_ADDR || record_state == EEP_RECORD_CORRUPT ||
++    if (cal_state != EEP_STATE_B3_VALID ||
++        count > MAX_INDEX_ADDR || record_state == EEP_RECORD_CORRUPT ||
+         record_state == EEP_RECORD_IO_ERROR ||
+         record_state == EEP_RECORD_NOT_READY) return 0U;
+     B3_MakeRecordMeta(buf, count, record_sequence + 1U);
+@@ -547,7 +542,8 @@
+ 
+ uint8_t Eep_Get_Node_Count(uint16_t *count)
+ {
+-    if (count == NULL || record_state == EEP_RECORD_CORRUPT ||
++    if (cal_state != EEP_STATE_B3_VALID ||
++        count == NULL || record_state == EEP_RECORD_CORRUPT ||
+         record_state == EEP_RECORD_IO_ERROR ||
+         record_state == EEP_RECORD_NOT_READY) return 0U;
+     *count=record_count;
+@@ -598,7 +594,8 @@
+ uint8_t Eep_Input_Node(uint16_t index, EEP_NODE node)
+ {
+     uint8_t raw[EEP_NODE_ENCODED_LEN];
+-    if (record_state == EEP_RECORD_CORRUPT ||
++    if (cal_state != EEP_STATE_B3_VALID ||
++        record_state == EEP_RECORD_CORRUPT ||
+         record_state == EEP_RECORD_IO_ERROR ||
+         record_state == EEP_RECORD_NOT_READY) return 3U;
+     if (record_count >= MAX_INDEX_ADDR) return 1U;
+@@ -616,7 +613,8 @@
+     EEP_NODE decoded;
+     uint8_t raw[EEP_NODE_ENCODED_LEN];
+     uint16_t addr;
+-    if (node == NULL || record_state == EEP_RECORD_CORRUPT ||
++    if (cal_state != EEP_STATE_B3_VALID ||
++        node == NULL || record_state == EEP_RECORD_CORRUPT ||
+         record_state == EEP_RECORD_IO_ERROR ||
+         record_state == EEP_RECORD_NOT_READY) return 3U;
+     if (record_count == 0U) return 1U;
+@@ -637,41 +635,15 @@
+     return B3_SaveRecordCount(0U);
+ }
+ 
++/* Legacy import/read are disabled and do not access physical EEPROM. */
+ uint8_t Eep_Read_Legacy_Record(uint16_t index, void *node)
+ {
+-    EEP_NODE decoded;
+-    uint8_t raw[EEP_NODE_ENCODED_LEN];
+-    uint16_t old_addr;
+-    if (node == NULL || index >= MAX_INDEX_ADDR) return 0U;
+-    old_addr=(uint16_t)((uint32_t)index*EEP_NODE_ENCODED_LEN);
+-    if (AT24C512_ReadBuffer(old_addr, raw, EEP_NODE_ENCODED_LEN)
+-        != EEPROM_OK) return 0U;
+-    DecodeNode(&decoded, raw);
+-    memcpy(node, &decoded, sizeof(decoded));
+-    return 1U;
++    (void)index; (void)node;
++    return 0U;
+ }
+ 
+ uint8_t Eep_Import_Legacy_Records(uint16_t verified_count)
+ {
+-    uint16_t i, old_addr;
+-    uint8_t raw[EEP_NODE_ENCODED_LEN], all_ff;
+-    uint8_t j;
+-    /* [B3] Service-only, requires operator backup and manual count.
+-     * Will NEVER read/write the overlapping legacy node counters. */
+-    if (!legacy_record_import_approved ||
+-        record_state != EEP_RECORD_EMPTY ||
+-        verified_count > MAX_INDEX_ADDR) return 0U;
+-    for (i=0U; i<verified_count; ++i)
+-    {
+-        old_addr=(uint16_t)((uint32_t)i*EEP_NODE_ENCODED_LEN);
+-        if (AT24C512_ReadBuffer(old_addr, raw, EEP_NODE_ENCODED_LEN)
+-            != EEPROM_OK) return 0U;
+-        all_ff=1U;
+-        for (j=0U; j<EEP_NODE_ENCODED_LEN; ++j)
+-            if (raw[j]!=0xFFU) {all_ff=0U; break;}
+-        if (all_ff || !B3_WriteRecord(i, raw)) return 0U;
+-    }
+-    if (!B3_SaveRecordCount(verified_count)) return 0U;
+-    legacy_record_import_approved=0U;
+-    return 1U;
+-}
++    (void)verified_count;
++    return 0U;
++}
+--- V1.0.3_B3/STM32L151/Software/inc/App_Eep.h
++++ V1.0.4_B31/STM32L151/Software/inc/App_Eep.h
+@@ -4,14 +4,10 @@
+ #include "main.h"
+ #include "param_head.h"
+ 
+-/* [B3] AT24C512 physical 64 KiB array. NEW storage does not overlap
+- * the old firmware's record bytes (0x0000..0x05DB) or its calibration
+- * data in the last 35 bytes of EEPROM.
+- *
+- * Calibration copies A/B: 64 byte CRC-checked snapshots, in separate
+- * 128-byte pages. Record counter copies A/B: same journal scheme.
+- * The active marker is always written LAST and the unused slot is not
+- * invalidated until a newer record has been committed.
++/* [B3.1] AT24C512 production layout (64 KiB), disjoint regions:
++ * records 0x2000..0x25DB (100 x 15 bytes), calibration A/B 0xE000 / 0xE080,
++ * record-count journal A/B 0xE100 / 0xE180 (64 bytes/slot).
++ * Each A/B slot starts on a different physical 128-byte EEPROM page.
+  */
+ #define EEP_MAX_ADDR                 65536UL
+ #define EEP_B3_RECORD_START          0x2000U
+@@ -23,48 +19,34 @@
+ #define MAX_INDEX_ADDR              100U
+ #define EEP_NODE_ENCODED_LEN         15U
+ 
+-/* [B3] SERVICE-ONLY compile-time opt-in. SHIPPED DISABLED.
+- * Never enable without an independently verified, complete 64-KiB
+- * backup of the actual physical EEPROM and calibration review.
+- * Rebuild with these set back to zero after the one-time service. */
+-#define EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE  0
+-#define EEP_B3_SERVICE_IMPORT_LEGACY_COUNT        0
++/* Obsolete service switches MUST remain zero in the production firmware.
++ * B3.1 intentionally has NO legacy decoding or migration implementation.
++ * The factory-only initialization requires a full 64KiB erased check;
++ * these two switches are NOT involved in initialization or saving. */
++#define EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE 0
++#define EEP_B3_SERVICE_IMPORT_LEGACY_COUNT       0
++#if EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE || EEP_B3_SERVICE_IMPORT_LEGACY_COUNT
++#error "B3.1 production firmware does not support legacy EEPROM migration"
++#endif
+ 
+-/* [B3] Legacy offsets: READ-ONLY, kept for service/backup inspection.
+- * The old storage markers/counters overlap calibration bytes. Never
+- * write any of these addresses through the B3 application.
+- */
+-#define EEP_USE_FLAG_START          65535U
+-#define EEP_PASSWORD_START          65531U
+-#define CG_LEFT_180_START           65529U
+-#define CG_LEFT_0_START             65527U
+-#define CG_RIGHT_180_START          65525U
+-#define CG_RIGHT_0_START            65523U
+-#define CG_Temperature_START        65519U
+-#define GJ_1410_AD_START            65517U
+-#define GJ_1435_AD_START            65515U
+-#define GJ_1470_AD_START            65513U
+-#define GJ_Temperature_START        65509U
+-#define CZ_AD_START                 65507U
+-#define HB_AD_START                 65505U
+-#define CH_Temperature_START        65501U
+-#define NODE_INDEX_ADDR_START       65503U
+-#define NODE_INPUT_NUM_ADDR_START   65505U
++/* Compile-time physical address and slot separation checks. */
++#if (EEP_B3_RECORD_START + MAX_INDEX_ADDR * EEP_NODE_ENCODED_LEN) > EEP_B3_CAL_SLOT_A
++#error "B3.1 record data overlaps calibration"
++#endif
++#if (EEP_B3_CAL_SLOT_A + EEP_B3_SLOT_LEN > EEP_B3_CAL_SLOT_B) || \
++    (EEP_B3_CAL_SLOT_B + EEP_B3_SLOT_LEN > EEP_B3_NODE_SLOT_A) || \
++    (EEP_B3_NODE_SLOT_A + EEP_B3_SLOT_LEN > EEP_B3_NODE_SLOT_B) || \
++    (EEP_B3_NODE_SLOT_B + EEP_B3_SLOT_LEN > EEP_MAX_ADDR)
++#error "B3.1 journal slots overlap or extend beyond EEPROM"
++#endif
+ 
+-/* A legacy read may have to use RAM defaults for damaged values.
+- * No automatic rewrite/migration is ever performed on power-up. */
+-#define EEP_LEGACY_BAD_PASSWORD     0x01U
+-#define EEP_LEGACY_BAD_CG           0x02U
+-#define EEP_LEGACY_BAD_GJ           0x04U
+-#define EEP_LEGACY_BAD_CH           0x08U
+-#define EEP_LEGACY_TEMP_UNCERTAIN   0x10U
+-
++/* Existing numeric values are retained for Keil Watch compatibility. */
+ typedef enum
+ {
+     EEP_STATE_NOT_READY = 0,
+     EEP_STATE_B3_VALID = 1,
+-    EEP_STATE_LEGACY_LOCKED = 2,
+-    EEP_STATE_FACTORY_EMPTY = 3,
++    EEP_STATE_NONBLANK_LOCKED = 2, /* no valid B3 cal; auto write refused */
++    EEP_STATE_FACTORY_EMPTY = 3,  /* transient only during factory init */
+     EEP_STATE_B3_CORRUPT = 4,
+     EEP_STATE_IO_ERROR = 5
+ } EEP_STORAGE_STATE;
+@@ -78,42 +60,43 @@
+     EEP_RECORD_IO_ERROR = 4
+ } EEP_RECORD_STATE;
+ 
+-uint8_t Eep_Data_Get(void); /* [B3] Read-only boot load; 1=I2C usable */
++/* Return 1 only if calibration is valid and records are usable.
++ * Factory blank: checks EVERY byte is 0xFF and initializes calibration
++ * into TWO CRC/commit-validated copies. Existing B3 snapshots are loaded
++ * without writes. Nonblank with no valid calibration remains locked.
++ */
++uint8_t Eep_Data_Get(void);
++EEP_STORAGE_STATE Eep_Get_Storage_State(void);
++EEP_RECORD_STATE Eep_Get_Record_State(void);
++uint8_t Eep_Get_Legacy_Warnings(void); /* always 0 in B3.1 */
+ 
+-/* [B3] A legacy EEPROM cannot be silently promoted. Run a full
+- * EEPROM backup & compare calibration data first, then explicitly
+- * call the authorization API in a service/debug session. */
++/* These APIs stay as safe no-ops for source compatibility. */
+ uint8_t Eep_Approve_Legacy_Calibration_Upgrade(void);
+-uint8_t Eep_Approve_Legacy_Record_Import(void); /* separate explicit authorization */
++uint8_t Eep_Approve_Legacy_Record_Import(void);
++uint8_t Eep_Read_Legacy_Record(uint16_t index, void *node);
++uint8_t Eep_Import_Legacy_Records(uint16_t verified_count);
++
++/* User-confirmed calibration/password are persisted as whole snapshots.
++ * Each function returns 1 only after write AND CRC/readback verification.
++ */
+ uint8_t Eep_Save_CG_Calibration(CG_Calibration_Param_Str data);
+ uint8_t Eep_Save_GJ_Calibration(GJ_Calibration_Param_Str data);
+ uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str data);
+ uint8_t Eep_Save_Password(uint32_t password);
+ 
+-EEP_STORAGE_STATE Eep_Get_Storage_State(void);
+-EEP_RECORD_STATE Eep_Get_Record_State(void);
+-uint8_t Eep_Get_Legacy_Warnings(void);
+-
+-/* The deprecated raw-write APIs intentionally reject calibration writes.
+- * Call the corresponding atomic Eep_Save_* function instead. */
++/* Obsolete single-field/raw writes are disabled in B3.1. */
+ uint8_t Eep_Write_For_Signed16(uint16_t addr, int16_t data);
+ uint8_t Eep_Write_For_Unsigned16(uint16_t addr, uint16_t data);
+ uint8_t Eep_Write_For_Float(uint16_t addr, float data);
+ uint8_t Eep_Write_For_Unsigned32(uint16_t addr, uint32_t data);
+ 
+-/* B3 records are stored at EEP_B3_RECORD_START (15 bytes per entry).
+- * Eep_Input_Node(index,...) is an append operation: index == count.
+- * For node input/read return 0 on success and nonzero on error.
+- * Eep_Clear_Node returns 1 on logical clear success, 0 on failure. */
++/* Records: append at index == current count, max 100; 0=success for
++ * Eep_Input/Output_Node, 1=success for Eep_Clear_Node.
++ * Clear is logical: new records overwrite old payloads from index 0.
++ */
+ uint8_t Eep_Get_Node_Count(uint16_t *count);
+ uint8_t Eep_Input_Node(uint16_t index, EEP_NODE node);
+ uint8_t Eep_Output_Node(uint16_t index, void *node);
+ uint8_t Eep_Clear_Node(void);
+ 
+-/* Read-only legacy inspection and EXPLICIT opt-in import into B3.
+- * The verified_count MUST come from an independent external backup.
+- * Never automatically trust the overlapped legacy count addresses. */
+-uint8_t Eep_Read_Legacy_Record(uint16_t index, void *node);
+-uint8_t Eep_Import_Legacy_Records(uint16_t verified_count);
+-
+ #endif
+--- V1.0.3_B3/STM32L151/Core/Src/main.c
++++ V1.0.4_B31/STM32L151/Core/Src/main.c
+@@ -65,8 +65,8 @@
+ /* USER CODE BEGIN PV */
+ float Power_vol = 0;
+ PAGE_ID page_id = page_logo;
+-/* [B3] Read-only boot result: 1=I2C usable, 0=failure. Watch
+- * Eep_Get_Storage_State() and Eep_Get_Record_State() separately. */
++/* [B3.1] EEPROM boot result: 1=valid calibration and record state,
++ * 0=initialization/read/CRC failure or nonblank-unrecognized chip. */
+ volatile uint8_t B3_Eeprom_Boot_OK = 0U;
+ 
+ /* USER CODE END PV */
+@@ -131,23 +131,15 @@
+   PCF8563_Init(&hi2c2);
+   OLED_Init();
+   Page_init();
+-  /* [B3] Read-only boot probe/load, never auto-rewrite legacy EEPROM. */
++  /* [B3.1] Blank AT24C512 is initialized on first boot; existing B3
++   * calibration and record journals are never rewritten during boot.
++   * No legacy EEPROM service or migration is enabled in production. */
+   B3_Eeprom_Boot_OK = Eep_Data_Get();
+-/* [B3-DEBUG] ????,???EEPROM */
+-Debug_Eep_Storage = Eep_Get_Storage_State();
+-Debug_Eep_Record = Eep_Get_Record_State();
+-Debug_Eep_Warnings = Eep_Get_Legacy_Warnings();
+-  /* [B3] Service-only, explicitly opt-in after verified off-device backup.
+-   * Both switches in App_Eep.h ship disabled; re-disable after migration. */
+-#if EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE
+-  if (B3_Eeprom_Boot_OK)
+-      (void)Eep_Approve_Legacy_Calibration_Upgrade();
+-#endif
+-#if EEP_B3_SERVICE_IMPORT_LEGACY_COUNT > 0
+-  if (B3_Eeprom_Boot_OK && Eep_Approve_Legacy_Record_Import())
+-      (void)Eep_Import_Legacy_Records(EEP_B3_SERVICE_IMPORT_LEGACY_COUNT);
+-#endif
+-  
++  Debug_Eep_Storage = Eep_Get_Storage_State();
++  Debug_Eep_Record = Eep_Get_Record_State();
++  Debug_Eep_Warnings = Eep_Get_Legacy_Warnings();
++  /* Audible startup warning if EEPROM could not be initialized/loaded. */
++  if (B3_Eeprom_Boot_OK == 0U) Beep_Ctrl(100U, 3U);
+   //Test();
+   /* USER CODE END 2 */
+ 
+--- V1.0.3_B3/B2_HOST_TESTS/test_main.c
++++ V1.0.4_B31/B2_HOST_TESTS/test_main.c
+@@ -4,6 +4,9 @@
+ #include "agreement_head.h"
+ #include "App_Eep.h"
+ #include "at24c512_head.h"
++/* B2 UART fixture keeps its own fake EEPROM counter; B3.1 firmware
++ * does NOT use this address. This definition exists in the TEST only. */
++#define NODE_INPUT_NUM_ADDR_START 65505U
+ 
+ UART_HandleTypeDef huart1 = {USART1, NULL, 0, 0};
+ UART_HandleTypeDef huart2 = {USART2, NULL, 0, 0};
+--- V1.0.3_B3/B3_HOST_TESTS/run_b3_tests.sh
++++ V1.0.4_B31/B3_HOST_TESTS/run_b3_tests.sh
+@@ -1,13 +1,6 @@
+ #!/bin/sh
++# B3 test runner is retained for historical convenience. The previous
++# legacy-import tests apply to B3 ONLY, not this production B3.1 build.
+ set -eu
+ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+-ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
+-BIN=$(mktemp /tmp/b3_eeprom_test_XXXXXX)
+-trap 'rm -f "$BIN"' EXIT
+-cc -std=c99 -O1 -g -Wall -Wextra -Werror \
+-  -fsanitize=undefined -fstack-protector-all -fno-omit-frame-pointer \
+-  -I "$HERE" -I "$ROOT/STM32L151/Software/inc" \
+-  "$ROOT/STM32L151/Software/src/at21c512_code.c" \
+-  "$ROOT/STM32L151/Software/src/App_Eep.c" \
+-  "$HERE/test_b3.c" -o "$BIN"
+-UBSAN_OPTIONS=halt_on_error=1 "$BIN"
++exec sh "$HERE/../B31_HOST_TESTS/run_b31_tests.sh"
+--- /dev/null
++++ V1.0.4_B31/B31_HOST_TESTS/main.h
+@@ -0,0 +1,16 @@
++#ifndef B3_TEST_MAIN_H
++#define B3_TEST_MAIN_H
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++#include <assert.h>
++typedef struct { uint32_t dummy; } I2C_HandleTypeDef;
++typedef enum { HAL_OK=0, HAL_ERROR=1, HAL_BUSY=2, HAL_TIMEOUT=3 } HAL_StatusTypeDef;
++typedef enum {GPIO_PIN_RESET=0, GPIO_PIN_SET=1} GPIO_PinState;
++#define I2C_MEMADD_SIZE_16BIT 0x10U
++HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *, uint16_t, uint16_t, uint16_t, uint8_t *, uint16_t, uint32_t);
++HAL_StatusTypeDef HAL_I2C_Mem_Read(I2C_HandleTypeDef *, uint16_t, uint16_t, uint16_t, uint8_t *, uint16_t, uint32_t);
++HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *, uint16_t, uint32_t, uint32_t);
++void HAL_Delay(uint32_t);
++#endif
+--- /dev/null
++++ V1.0.4_B31/B31_HOST_TESTS/test_b31.c
+@@ -0,0 +1,339 @@
++#include "main.h"
++#include "at24c512_head.h"
++#include "App_Eep.h"
++#include "param_head.h"
++
++I2C_HandleTypeDef hi2c1 = {0};
++uint32_t Driver_Calibration_Password = 997900UL;
++CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20.0f};
++GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20.0f};
++CH_Calibration_Param_Str CH_Param = {10000,13000,20.0f};
++
++static uint8_t mem[65536];
++static unsigned writes, reads, polls, assertions, page_crosses, writes_to_old;
++static int fail_after_writes=-1, fail_after_reads=-1;
++static uint8_t wp, bus_off, ack_timeout, enforce_layout;
++#define CHECK(x) do { assert(x); assertions++; } while(0)
++
++static void reset_globals(void)
++{
++    Driver_Calibration_Password=997900UL;
++    CG_Param.CG_Zero_Left_Ad=1; CG_Param.CG_Max_Left_Ad=-12445;
++    CG_Param.CG_Zero_Right_Ad=50; CG_Param.CG_Max_Right_Ad=12513;
++    CG_Param.temp=20.0f;
++    GJ_Param.GJ_1410_Ad=7781; GJ_Param.GJ_1435_Ad=15946;
++    GJ_Param.GJ_1470_Ad=27395; GJ_Param.temp=20.0f;
++    CH_Param.CZ_Ad=10000; CH_Param.HB_Ad=13000; CH_Param.temp=20.0f;
++}
++static void reset_all(void)
++{
++    memset(mem,0xFF,sizeof(mem)); reset_globals();
++    writes=reads=polls=page_crosses=writes_to_old=0;
++    fail_after_writes=fail_after_reads=-1; wp=bus_off=ack_timeout=0;
++    enforce_layout=1;
++}
++HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *h, uint16_t d,
++                                        uint32_t trials,uint32_t t)
++{
++    (void)h; (void)trials; (void)t;
++    assert(d==0xA0U); polls++;
++    return (bus_off || ack_timeout) ? HAL_TIMEOUT : HAL_OK;
++}
++HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *h,uint16_t d,
++        uint16_t a,uint16_t mode,uint8_t *src,uint16_t n,uint32_t t)
++{
++    (void)h;
++    assert(d==0xA0U && mode==I2C_MEMADD_SIZE_16BIT && t<=100U);
++    assert(n && src && (uint32_t)a+n<=65536UL);
++    if ((uint32_t)(a%128U)+n>128U) {page_crosses++;return HAL_ERROR;}
++    if (enforce_layout)
++    {
++        uint32_t end=(uint32_t)a+n;
++        assert(((a >= EEP_B3_RECORD_START) &&
++                end <= EEP_B3_RECORD_START + MAX_INDEX_ADDR * EEP_NODE_ENCODED_LEN) ||
++               ((a >= EEP_B3_CAL_SLOT_A) && end <= EEP_B3_CAL_SLOT_A + EEP_B3_SLOT_LEN) ||
++               ((a >= EEP_B3_CAL_SLOT_B) && end <= EEP_B3_CAL_SLOT_B + EEP_B3_SLOT_LEN) ||
++               ((a >= EEP_B3_NODE_SLOT_A) && end <= EEP_B3_NODE_SLOT_A + EEP_B3_SLOT_LEN) ||
++               ((a >= EEP_B3_NODE_SLOT_B) && end <= EEP_B3_NODE_SLOT_B + EEP_B3_SLOT_LEN));
++    }
++    if (bus_off) return HAL_TIMEOUT;
++    if (fail_after_writes>=0 && writes>=(unsigned)fail_after_writes)
++        return HAL_ERROR;
++    writes++;
++    if (!wp)
++    {
++        memcpy(mem+a,src,n);
++        if (a<1500U || a>=65501U) writes_to_old++;
++    }
++    return HAL_OK;
++}
++HAL_StatusTypeDef HAL_I2C_Mem_Read(I2C_HandleTypeDef *h,uint16_t d,
++        uint16_t a,uint16_t mode,uint8_t *dst,uint16_t n,uint32_t t)
++{
++    (void)h;
++    assert(d==0xA0U && mode==I2C_MEMADD_SIZE_16BIT && t<=100U);
++    assert(n && dst && (uint32_t)a+n<=65536UL);
++    if (bus_off) return HAL_TIMEOUT;
++    if (fail_after_reads>=0 && reads>=(unsigned)fail_after_reads)
++        return HAL_ERROR;
++    reads++; memcpy(dst,mem+a,n); return HAL_OK;
++}
++void HAL_Delay(uint32_t delay) { CHECK(delay<100U); }
++
++static void test_driver(void)
++{
++    uint8_t a[5]={1,2,3,4,5},b[5]={0};
++    reset_all(); enforce_layout=0; mem[0]=0xC3;
++    CHECK(AT24C512_Init()==EEPROM_OK);
++    CHECK(writes==0 && mem[0]==0xC3);
++    CHECK(AT24C512_WriteBuffer(0x007FU,a,5)==EEPROM_OK);
++    CHECK(page_crosses==0 && writes==2);
++    CHECK(mem[0x007F]==1 && mem[0x0080]==2 && mem[0x0083]==5);
++    CHECK(AT24C512_ReadBuffer(0x007FU,b,5)==EEPROM_OK);
++    CHECK(memcmp(a,b,5)==0);
++    CHECK(AT24C512_WriteByte(0xFFFFU,0xDE)==EEPROM_OK);
++    CHECK(mem[0xFFFF]==0xDE);
++    CHECK(AT24C512_WriteBuffer(0xFFFFU,a,2)==EEPROM_INVALID_ARG);
++    CHECK(AT24C512_ReadBuffer(0xFFFFU,b,2)==EEPROM_INVALID_ARG);
++    CHECK(AT24C512_WriteBuffer(0U,NULL,1)==EEPROM_INVALID_ARG);
++    CHECK(AT24C512_ReadBuffer(0U,NULL,1)==EEPROM_INVALID_ARG);
++    CHECK(AT24C512_WritePage(512U,a)==EEPROM_INVALID_ARG);
++    CHECK(AT24C512_ReadPage(512U,a)==EEPROM_INVALID_ARG);
++    {
++        uint8_t data[260], check[260];
++        for(unsigned i=0;i<260;i++) data[i]=(uint8_t)(i*17U);
++        CHECK(AT24C512_WriteBuffer(0x017FU,data,260U)==EEPROM_OK);
++        CHECK(AT24C512_ReadBuffer(0x017FU,check,260U)==EEPROM_OK);
++        CHECK(memcmp(data,check,260U)==0 && page_crosses==0);
++    }
++    CHECK(AT24C512_WriteBuffer(0U,NULL,0)==EEPROM_OK);
++    CHECK(AT24C512_ReadBuffer(0U,NULL,0)==EEPROM_OK);
++    bus_off=1; CHECK(AT24C512_Init()==EEPROM_TIMEOUT); bus_off=0;
++    ack_timeout=1; CHECK(AT24C512_WriteByte(0x40U,0x33U)==EEPROM_TIMEOUT);
++}
++
++static void test_factory_init_once(void)
++{
++    unsigned before, rbefore;
++    reset_all();
++    CHECK(EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE==0);
++    CHECK(EEP_B3_SERVICE_IMPORT_LEGACY_COUNT==0);
++    CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_VALID);
++    CHECK(Eep_Get_Record_State()==EEP_RECORD_EMPTY);
++    CHECK(Eep_Get_Legacy_Warnings()==0);
++    CHECK(reads>=512U && writes==6U);
++    CHECK(mem[EEP_B3_CAL_SLOT_A+63U]==0xA5U);
++    CHECK(mem[EEP_B3_CAL_SLOT_B+63U]==0xA5U);
++    CHECK(mem[0]==0xFFU && mem[0xFFFFU]==0xFFU);
++    CHECK(mem[EEP_B3_NODE_SLOT_A]==0xFFU);
++    CHECK(writes_to_old==0);
++    before=writes; rbefore=reads;
++    reset_globals();
++    Driver_Calibration_Password=123456UL; CG_Param.temp=42.0f;
++    CHECK(Eep_Data_Get()==1);
++    CHECK(writes==before && reads-rbefore==4U);
++    CHECK(Driver_Calibration_Password==997900UL && CG_Param.temp==20.0f);
++    CHECK(GJ_Param.GJ_1435_Ad==15946U && CG_Param.temp==20.0f);
++    CHECK(Eep_Approve_Legacy_Calibration_Upgrade()==0);
++    CHECK(Eep_Approve_Legacy_Record_Import()==0);
++    CHECK(Eep_Read_Legacy_Record(0U,NULL)==0);
++    CHECK(Eep_Import_Legacy_Records(0U)==0);
++    CHECK(Eep_Write_For_Unsigned32(0xFFFBU,123U)==0);
++    CHECK(Eep_Write_For_Unsigned16(0xFFFFU,123U)==0);
++    CHECK(Eep_Write_For_Signed16(0xFFFFU,-123)==0);
++    CHECK(Eep_Write_For_Float(0xFFFFU,42.0f)==0);
++    CHECK(writes==before);
++}
++
++static void test_nonblank_locked(void)
++{
++    static const uint16_t addrs[]={0,0x05DBU,0x1000U,0x2000U,
++                                     0xE100U,0xE180U,0xFFDDU,0xFFFFU};
++    for (unsigned i=0;i<sizeof(addrs)/sizeof(addrs[0]);i++)
++    {
++        reset_all(); mem[addrs[i]]=0x77U;
++        CHECK(Eep_Data_Get()==0);
++        CHECK(Eep_Get_Storage_State()==EEP_STATE_NONBLANK_LOCKED);
++        CHECK(writes==0 && mem[addrs[i]]==0x77U);
++        CHECK(Eep_Save_Password(123456UL)==0);
++        { EEP_NODE test_node={0}; CHECK(Eep_Input_Node(0U,test_node)==3); }
++        CHECK(Eep_Clear_Node()==0);
++        CHECK(writes==0);
++        CHECK(Driver_Calibration_Password==997900UL);
++    }
++    reset_all(); mem[EEP_B3_CAL_SLOT_A+3]=0x52U;
++    CHECK(Eep_Data_Get()==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_CORRUPT);
++    CHECK(writes==0);
++    /* A/B calibration slots erased while a B3 record counter is present
++     * cannot be interpreted as a newly manufactured chip. */
++    reset_all(); mem[EEP_B3_NODE_SLOT_B]=0x41U;
++    CHECK(Eep_Data_Get()==0 && writes==0);
++}
++
++static void test_failures_and_factory_recovery(void)
++{
++    for(int limit=0;limit<=3;limit++)
++    {
++        reset_all(); fail_after_writes=limit;
++        CHECK(Eep_Data_Get()==0);
++        CHECK(Eep_Get_Storage_State()==EEP_STATE_IO_ERROR);
++        fail_after_writes=-1;
++        reset_globals();
++        CHECK(Eep_Data_Get()==1);
++        CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_VALID);
++        CHECK(Driver_Calibration_Password==997900UL);
++        CHECK(mem[EEP_B3_CAL_SLOT_A+63U]==0xA5U);
++        CHECK(writes_to_old==0);
++    }
++    reset_all(); fail_after_reads=5;
++    CHECK(Eep_Data_Get()==0 && writes==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_IO_ERROR);
++    fail_after_reads=-1;
++    CHECK(Eep_Data_Get()==1);
++    reset_all(); wp=1;
++    CHECK(Eep_Data_Get()==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_IO_ERROR);
++    CHECK(mem[EEP_B3_CAL_SLOT_A+63U]==0xFFU);
++    wp=0; CHECK(Eep_Data_Get()==1);
++    reset_all(); CG_Param.CG_Max_Left_Ad=10;
++    CHECK(Eep_Data_Get()==0 && writes==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_IO_ERROR);
++    /* Partial factory image PLUS any unrelated byte must be refused. */
++    reset_all(); fail_after_writes=1;
++    CHECK(Eep_Data_Get()==0);
++    fail_after_writes=-1;
++    mem[0x6000U]=0x20U;
++    CHECK(Eep_Data_Get()==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_CORRUPT);
++}
++
++static EEP_NODE node(unsigned i)
++{
++    EEP_NODE n;
++    n.year=26; n.month=11; n.day=(uint8_t)(i%28+1);
++    n.hour=12; n.min=34; n.sec=56; n.type=1;
++    n.data1=0x12345678U+i; n.data2=0xABCDEF00U+i;
++    return n;
++}
++
++static void test_calibration_records_separation(void)
++{
++    CG_Calibration_Param_Str cg;
++    GJ_Calibration_Param_Str gj;
++    CH_Calibration_Param_Str ch;
++    EEP_NODE n;
++    uint16_t count;
++    unsigned before;
++    reset_all(); CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==0);
++    CHECK(Eep_Input_Node(4U,node(0))==2);
++    CHECK(Eep_Input_Node(0U,node(0))==0);
++    CHECK(Eep_Input_Node(1U,node(1))==0);
++    cg=CG_Param; cg.CG_Max_Left_Ad=-12500; cg.temp=23.5f;
++    gj=GJ_Param; gj.GJ_1435_Ad=16800; gj.temp=25.25f;
++    ch=CH_Param; ch.CZ_Ad=10222; ch.temp=26.0f;
++    CHECK(Eep_Save_CG_Calibration(cg)==1);
++    CHECK(Eep_Save_GJ_Calibration(gj)==1);
++    CHECK(Eep_Save_CH_Calibration(ch)==1);
++    CHECK(Eep_Save_Password(654321UL)==1);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==2);
++    CHECK(Eep_Output_Node(1U,&n)==0 && n.data2==node(1).data2);
++    CHECK(writes_to_old==0 && page_crosses==0);
++    before=writes;
++    reset_globals(); CHECK(Eep_Data_Get()==1);
++    CHECK(writes==before);
++    CHECK(Driver_Calibration_Password==654321UL);
++    CHECK(CG_Param.CG_Max_Left_Ad==-12500 && CG_Param.temp==23.5f);
++    CHECK(GJ_Param.GJ_1435_Ad==16800U && GJ_Param.temp==25.25f);
++    CHECK(CH_Param.CZ_Ad==10222U && CH_Param.temp==26.0f);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==2);
++    CHECK(Eep_Output_Node(0U,&n)==0 && n.data1==node(0).data1);
++    CHECK(Eep_Save_Password(9999999UL)==0);
++    CHECK(Driver_Calibration_Password==654321UL && writes==before);
++}
++
++static void test_cal_rollback_and_wp(void)
++{
++    unsigned done;
++    GJ_Calibration_Param_Str gj;
++    reset_all(); CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Save_Password(111111UL)==1); /* slot A, seq 3 */
++    CHECK(Eep_Save_Password(222222UL)==1); /* slot B, seq 4 */
++    mem[EEP_B3_CAL_SLOT_B+63U]=0;
++    reset_globals(); CHECK(Eep_Data_Get()==1);
++    CHECK(Driver_Calibration_Password==111111UL);
++    CHECK(Eep_Save_Password(333333UL)==1);
++    done=writes;
++    fail_after_writes=(int)done+1;
++    CHECK(Eep_Save_Password(444444UL)==0);
++    fail_after_writes=-1;
++    reset_globals(); CHECK(Eep_Data_Get()==1);
++    CHECK(Driver_Calibration_Password==333333UL);
++    gj=GJ_Param; gj.GJ_1435_Ad=gj.GJ_1410_Ad;
++    CHECK(Eep_Save_GJ_Calibration(gj)==0);
++    CHECK(GJ_Param.GJ_1435_Ad==15946U);
++    wp=1;
++    CHECK(Eep_Save_Password(555555UL)==0);
++    CHECK(Driver_Calibration_Password==333333UL);
++    wp=0;
++    mem[EEP_B3_CAL_SLOT_A+63U]=0;
++    mem[EEP_B3_CAL_SLOT_B+63U]=0;
++    CHECK(Eep_Data_Get()==0);
++    CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_CORRUPT);
++    CHECK(Eep_Save_Password(123UL)==0);
++}
++
++static void test_record_boundaries_and_meta_rollback(void)
++{
++    EEP_NODE a;
++    uint16_t count;
++    unsigned before;
++    reset_all(); CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Input_Node(0U,node(0))==0);
++    CHECK(Eep_Input_Node(1U,node(1))==0);
++    mem[EEP_B3_NODE_SLOT_B+61U]^=0x10U;
++    CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==1);
++    CHECK(Eep_Input_Node(1U,node(8))==0);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==2);
++    CHECK(Eep_Clear_Node()==1);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==0);
++    CHECK(Eep_Output_Node(0U,&a)==1);
++    before=writes; fail_after_writes=(int)before;
++    CHECK(Eep_Input_Node(0U,node(1))==3);
++    fail_after_writes=-1;
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==0);
++    for(unsigned i=0;i<MAX_INDEX_ADDR;i++)
++        CHECK(Eep_Input_Node((uint16_t)i,node(i))==0);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==MAX_INDEX_ADDR);
++    CHECK(Eep_Input_Node(MAX_INDEX_ADDR,node(0))==1);
++    reset_globals(); CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Get_Node_Count(&count)==1 && count==MAX_INDEX_ADDR);
++    CHECK(Eep_Output_Node(99U,&a)==0 && a.data1==node(99).data1);
++    CHECK(writes_to_old==0 && page_crosses==0);
++    mem[EEP_B3_NODE_SLOT_A+62U]^=0x7FU;
++    mem[EEP_B3_NODE_SLOT_B+62U]^=0x7FU;
++    CHECK(Eep_Data_Get()==0);
++    CHECK(Eep_Get_Record_State()==EEP_RECORD_CORRUPT);
++    CHECK(Eep_Get_Node_Count(&count)==0);
++    CHECK(Eep_Input_Node(1U,node(0))==3);
++    CHECK(Eep_Clear_Node()==0);
++}
++
++int main(void)
++{
++    test_driver();
++    test_factory_init_once();
++    test_nonblank_locked();
++    test_failures_and_factory_recovery();
++    test_calibration_records_separation();
++    test_cal_rollback_and_wp();
++    test_record_boundaries_and_meta_rollback();
++    printf("B3.1 EEPROM production tests: PASS %u assertions; "
++           "64KiB blank scan, init recovery, A/B persistence, "
++           "100 records, nonblank lock, I2C/WP/powerloss, disjoint layout.\n",
++           assertions);
++    return 0;
++}
+--- /dev/null
++++ V1.0.4_B31/B31_HOST_TESTS/run_b31_tests.sh
+@@ -0,0 +1,13 @@
++#!/bin/sh
++set -eu
++HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
++BIN=$(mktemp /tmp/b31_eeprom_XXXXXX)
++trap 'rm -f "$BIN"' EXIT
++cc -std=c99 -O1 -g -Wall -Wextra -Werror \
++  -fsanitize=undefined -fstack-protector-all -fno-omit-frame-pointer \
++  -I "$HERE" -I "$ROOT/STM32L151/Software/inc" \
++  "$ROOT/STM32L151/Software/src/at21c512_code.c" \
++  "$ROOT/STM32L151/Software/src/App_Eep.c" \
++  "$HERE/test_b31.c" -o "$BIN"
++UBSAN_OPTIONS=halt_on_error=1 "$BIN"
+--- /dev/null
++++ V1.0.4_B31/B3_HOST_TESTS/README_B31.txt
+@@ -0,0 +1,5 @@
++B3.1 production code no longer supports legacy EEPROM migration.
++The historical test_b3.c in this folder documents B3 behavior only.
++Run run_b3_tests.sh, which now forwards to B31_HOST_TESTS, or run
++B31_HOST_TESTS/run_b31_tests.sh directly. The old test_b3.c must NOT
++be compiled against B3.1 firmware: its legacy test expectations differ.
+--- /dev/null
++++ V1.0.4_B31/README_B31.md
+@@ -0,0 +1,29 @@
++# V1.0.4_B31｜AT24C512 EEPROM 新产品版
++
++这是在用户上传的 **V1.0.3_B3** 完整工程基础上完成的 **B3.1** 修改版。主控为 STM32L151，EEPROM 为 AT24C512（64 KiB）；倾角板 STM32F103 沿用 B2 源码，通信协议及测量算法未在本批修改。
++
++## 目标与已实现行为
++
++1. **只在整个 AT24C512 的 65,536 字节均为 `0xFF` 时，自动首次初始化**：将 `param_code.c` 的默认密码及 CG/GJ/CH 标定参数写成两个独立的 CRC16 双副本（`0xE000` / `0xE080`）。仅有两个标定槽为空并不足以触发初始化。
++2. **已经存在有效 B3 标定快照时只读恢复，不因正常开机而覆盖**；默认参数即使在新固件中改变，已有 EEPROM 的已保存值仍优先。
++3. **人工标定及密码修改持久保存**：已有按键页面继续调用 `Eep_Save_CG_Calibration`、`Eep_Save_GJ_Calibration`、`Eep_Save_CH_Calibration`、`Eep_Save_Password`，保存前验证业务参数，写入后 CRC 和回读验证；写入中断保留旧有效副本。
++4. **旧数据完全不迁移**：两个旧迁移宏保持 `0`，旧读取/导入/授权接口只是返回失败的兼容空函数，不解码旧标定和旧测量记录。
++5. **非空白且没有有效 B3 标定的 EEPROM 被锁定**：不执行自动初始化，也不允许人工标定或测量记录写入；须由生产工装确认允许清除后，再整片擦为 `0xFF` 才能当新芯片使用。
++6. **记录区与标定区、计数元数据区不重叠**：记录 100 条 × 15 字节，从 `0x2000` 开始，计数采用独立双副本 `0xE100` / `0xE180`。
++7. **意外中断首次初始化可恢复**：若首次写入 A 槽时掉电，只允许在全片其余区域仍为 `0xFF`、且 A 槽的已编程字节与出厂初始快照精确一致时重新完成初始化。其他损坏一律锁定，防止误覆盖。
++
++## 立即开始
++
++- Keil MDK5 主控工程：`STM32L151/MDK-ARM/STM32L151.uvprojx`
++- Keil MDK5 倾角板工程：`QINGJIAOBAN/PROJECT/GuiJuChi.uvprojx`
++- **详细修改日志**：`B31_20261104_详细修改日志.md`
++- **上板验证流程**：`B31_20261104_量产操作说明.md`
++- **回归报告**：`B31_20261104_回归测试报告.md`
++- 本机模拟 EEPROM 测试：`sh B31_HOST_TESTS/run_b31_tests.sh`
++- 旧 B2 UART 回归测试：`sh B2_HOST_TESTS/run_master_tests.sh`
++
++**重要：压缩包中的旧版历史 HEX/AXF 等生成产物未作为本次正式固件使用；必须在 Keil 中重新 `Rebuild all target files` 后下载。本版本通过主机模拟测试，但尚未实机 Keil 编译及 AT24C512 掉电验收，不应在未完成量产验证前宣称硬件量产验收通过。**
++
++**范围说明**：此次已验证 EEPROM 记录层的追加、读取、计数、清空和地址隔离；当前工程的其他业务源码中没有调用 `Eep_Input_Node()` 来自动保存测量结果。这不影响按键标定和密码持久化；若产品要求用户按“存储键”记录现场测量值，仍需另行确定记录格式并接入业务按键路径。记录数据本体目前没有单条 CRC，依赖读回验证与双副本计数日志。
++
++**历史资料**：原 `B3_20261103_*`、`README_B3.md` 保留供版本追溯，所述的旧数据服务或迁移不再适用于本版。
+--- /dev/null
++++ V1.0.4_B31/B31_20261104_详细修改日志.md
+@@ -0,0 +1,100 @@
++# 数显轨距尺 STM32L151｜B3.1 EEPROM 量产候选版修改日志
++
++**版本**：`V1.0.4_B31`（2026-11-04）
++
++**输入基线**：用户上传 `V1.0.3_B3.zip`。保留 B1 安全修复、B2 UART 通信修复和 B3 AT24C512 驱动与双槽存储格式。目标硬件为 STM32L151 + AT24C512。倾角板工程保持原 B2 源码。
++
++## 1. 产品决策与改动边界
++
++- 此工程用于**新产品**。不维护旧 EEPROM 格式，也不迁移旧标定参数、旧测量记录。
++- 新芯片的全片空白状态必须确认；单独看不到有效 B3 标定并不意味着可清空。
++- EEPROM 中已保存的新 B3 标定值，应在固件重新烧录、重新上电、修改编译默认值之后保持有效。
++- 人工标定、密码更新使用完整参数快照，不允许局部地址直接写入破坏别的字段；测量记录区域及记录计数也需独立。
++
++## 2. 逐项代码修改
++
++### B31-01｜`STM32L151/Software/src/App_Eep.c`
++
++1. 移除 `B3_LoadLegacy()` 及旧格式参数解析，开机不访问旧标定地址执行迁移判断，也不会加载不可信的旧参数。
++2. 加入 `B31_FactoryScan()`：仅在校准快照缺失或损坏时，顺序只读检查整片 `0x0000–0xFFFF` 这 65,536 个字节；检测到一个非 `0xFF` 字节即停止并判定非全新。任何 I2C 读取失败都禁止写入。
++3. 加入 `B31_InitializeFactoryCalibration()`：确认全片为空且编译默认参数合法后，按顺序提交 A、B 两份校准快照，各份仍使用原 B3 的魔数 `GJB3`、CRC16、单调序号及最后写入的 `0xA5` 提交标志。**原 B3 存储格式不改变。**
++4. 对首次写 A 槽时中断的特殊情况，仅当全片其他字节为空、A 槽所有已写字节与预期出厂快照一致且提交标志未生效时允许重新初始化。对其他损坏、无法识别的非空白芯片，设置锁定状态而非自动覆盖。
++5. 标定业务保存接口仅允许 `EEP_STATE_B3_VALID` 状态调用，非空白无快照和 I2C 错误时均拒绝保存。
++6. 对 `Eep_Input_Node()`、`Eep_Output_Node()`、`Eep_Get_Node_Count()`、`Eep_Clear_Node()` 的后台有效性检查增加标定有效状态前置要求，避免未初始化或异常芯片继续读写新的记录。
++7. 旧授权/旧记录导入接口保留函数符号但只返回失败，不进行实际 I2C 操作；四个废弃的原始字段写接口也继续返回失败，不可能绕过快照机制修改 EEPROM。
++8. 对其他已存在的 B3 记录追加、读回验证、CRC 双槽计数提交、密码/CG/GJ/CH 校验和双槽写入逻辑不做数据格式变更。
++
++### B31-02｜`STM32L151/Software/inc/App_Eep.h`
++
++1. 保留并固定两个用户指定宏：
++
++```c
++#define EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE 0
++#define EEP_B3_SERVICE_IMPORT_LEGACY_COUNT       0
++```
++
++若被意外改为非零，将直接触发 `#error` 使量产工程编译失败，防止误启用已经删除的旧迁移功能。
++2. 新增状态 `EEP_STATE_NONBLANK_LOCKED = 2`，代表没有有效新版标定且非空，**不执行自动初始化**；延续其他既有数值，方便 Keil Watch 对照。
++3. 移除实际业务不再需要的旧存储物理地址宏，禁止新代码重新使用重叠旧偏移。
++4. 增加编译期 EEPROM 分区边界检查，保证记录、标定 A/B、记录计数 A/B 不重叠且不超出地址空间。
++
++### B31-03｜`STM32L151/Core/Src/main.c`
++
++- 保持主控 GPIO/UART/I2C/RTC/OLED 原有初始化顺序。
++- 保持 `B3_Eeprom_Boot_OK = Eep_Data_Get();` 为上电初始化入口，但现在对全空白芯片会触发一次自动标定快照写入。
++- 保留 `Debug_Eep_Storage`、`Debug_Eep_Record`、`Debug_Eep_Warnings` 以便 Keil Watch 调试；上电 EEPROM 异常时增加三声错误提示（`Beep_Ctrl(100,3)`），但设备仍可能使用 RAM 默认参数显示，不能把错误蜂鸣视为可以放心测量。
++- 移除编译期维修升级授权及旧数据迁移的执行分支（宏仍以零值保留在头文件），避免固件在启动时运行遗留服务。
++
++### B31-04｜回归测试及文档
++
++- 新增 `B31_HOST_TESTS/`：模拟 65,536 字节 I2C EEPROM，严格检查 AT24C512 页写边界以及合法业务写入地址，注入断电、WP=高、I2C 失败、读回不一致、CRC 损坏等故障。
++- 为 `B2_HOST_TESTS/test_main.c` 添加测试专用旧计数地址常量，仅供 B2 通信模拟，不在量产业务代码中使用，保证 B2 通信回归仍可编译运行。
++- `B3_HOST_TESTS/run_b3_tests.sh` 改为转发执行当前 B3.1 测试；旧 `test_b3.c` 作为历史行为测试代码保留，不再代表本版要求。
++- 新增 `README_B31.md`、本日志、量产操作说明、变更文件清单、代码差异以及回归测试报告。
++
++## 3. 正式版 EEPROM 地址分区
++
++| 功能 | 起止地址 | 实际占用 | 更新规则 |
++|---|---|---|---|
++| 测量记录 | `0x2000–0x25DB` | 100 × 15 = 1500 字节 | 记录写入并回读成功后，才提交记录数 |
++| 标定 A | `0xE000–0xE03F` | 64 字节 | CRC/序号/末尾提交标志 |
++| 标定 B | `0xE080–0xE0BF` | 64 字节 | 独立 128 字节物理页 |
++| 记录数 A | `0xE100–0xE13F` | 64 字节 | 独立 CRC 双槽日志 |
++| 记录数 B | `0xE180–0xE1BF` | 64 字节 | 独立 CRC 双槽日志 |
++
++其余地址未分配给本版业务写入。EEPROM 驱动仍使用 AT24C512 16 位内部地址、128 字节页写拆包、写入周期 ACK 轮询、固定超时和回读验证。
++
++## 4. 上电状态机与保护行为
++
++- **场景 A：整片都是 `0xFF`**：全片扫描通过，确认编译默认密码及 CG/GJ/CH 合法，然后 A、B 双提交。`Eep_Data_Get()` 返回 1，`EEP_STATE_B3_VALID=1`，`EEP_RECORD_EMPTY=2`。测量记录计数暂不写入 EEPROM，首次追加时再提交记录元数据。
++- **场景 B：有有效 B3 标定**：直接恢复标定快照，读取记录计数，不做全片扫描，也不进行开机写入。若只剩一份有效标定，优先使用它。
++- **场景 C：无有效 B3 标定且全片非空**：`Eep_Data_Get()` 返回 0，`EEP_STATE_NONBLANK_LOCKED=2`；如果标定槽本身已损坏，则 `EEP_STATE_B3_CORRUPT=4`。禁止标定/记录写入。
++- **场景 D：空白扫描期间 I2C 错误/写入失败/WP 阻写**：`Eep_Data_Get()` 返回 0，`EEP_STATE_IO_ERROR=5`。不假设 EEPROM 已成功保存。
++- **场景 E：首次写 A 槽时掉电**：仅对符合完整出厂镜像的可证明中断写入状态做恢复。对于无法验证的损坏，拒绝覆盖，需生产工装检修。
++- **场景 F：人工重新标定**：对未使用的 A/B 槽写入新的完整快照；先使目标提交标志失效，写入主体并读回对比，再写提交标志，最后全槽校验；旧有效副本始终保留至新副本确认成功。
++
++## 5. 程序内默认值（代码定义，不等于精度已检定）
++
++`STM32L151/Software/src/param_code.c` 原有值未更改：
++
++```c
++uint32_t Driver_Calibration_Password = 997900;
++CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
++GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
++CH_Calibration_Param_Str CH_Param = {10000,13000,20};
++```
++
++新产品首次上电时保存的就是这些初始值；交付实际使用前仍必须用标准器具对每把轨距尺进行标定及精度检定。
++
++## 6. 验证与遗留限制
++
++- 本机宿主 GCC（UBSan + 栈保护，模拟 EEPROM）对 B3.1 测试 **326 项断言通过**，覆盖整片空白/非空、写入禁止、双副本及记录边界、100 条记录、故障和重启恢复。B2 主控 UART 回归 **41 项断言通过**。
++- 该验证不等于 ARMCC/Keil 真正编译或硬件掉电测试。未连接实物 EEPROM、未核对实际 A0/A1/A2/WP 电平，也未在实际供电波形下验收。
++- 存储芯片有有限擦写寿命，不应把“永久保存”理解成无限寿命或无法失效；此处是断电持久化和故障恢复机制。
++- 记录本体仍是 15 字节原业务格式，**没有每条记录 CRC**；CRC 用于记录数 A/B 元数据，记录本体由写入后的回读比较保障。若要求检测长期位翻转，需要另设逐记录 CRC。
++- 现有主控业务代码没有调用 `Eep_Input_Node()` 自动生成测量记录，若希望日后从测量页面按存储键记入 EEPROM，仍需明确记录的时间与测量值格式并接入；本次只完善现有 EEPROM API 与标定持久化，不擅自修改键盘和测量业务。
++- 旧 B3 说明文档只适用于历史版本，不能再按其说明开启旧数据迁移。
++
++## 7. 上板验收要求
++
++详见 `B31_20261104_量产操作说明.md`。至少应验证：全新芯片首次上电自动创建双快照；第二次上电零写入；人工标定和密码修改跨断电保存；I2C/WP异常不报假成功；芯片含任意未知内容时不自动写；记录达到 100 条不越界；确认 Keil Rebuild 使用本版源码。
+--- /dev/null
++++ V1.0.4_B31/B31_20261104_量产操作说明.md
+@@ -0,0 +1,42 @@
++# B3.1 新产品 EEPROM 烧录及实机验收步骤（Keil MDK5）
++
++**适用**：V1.0.4_B31，STM32L151 主控，AT24C512 64KiB。
++
++## 第一部分：烧录前核对
++
++1. 使用新装或经工装确认可清除并已整片擦为 `0xFF` 的 AT24C512。不能仅通过 Keil 内部 Flash 下载完成外接 EEPROM 擦除；外接 EEPROM 是另一颗 I2C 芯片。
++2. 对照硬件确认 AT24C512 I2C A0/A1/A2 引脚使地址为 7 位 `0x50`（HAL 使用 `0xA0`），确认 WP 脚处于允许写入的状态。芯片后缀、工作电压及 I2C 上拉仍需以实际硬件为准。
++3. 解压本工程，用 **Keil MDK5** 打开 `STM32L151/MDK-ARM/STM32L151.uvprojx`；选择正确目标与 ST-Link，确保 ARM Compiler 与 STM32L1 Device Pack 已安装。
++4. 打开 `Software/inc/App_Eep.h` 确认两项服务宏均为 `0`，不得启用旧迁移服务。通过 `Project → Rebuild all target files` 编译，再 `Flash → Download`。**不要直接烧录 ZIP 内历史生成的 HEX/AXF。**
++
++## 第二部分：Keil Watch 验证
++
++在 main.c 的 `B3_Eeprom_Boot_OK = Eep_Data_Get();` 后设置断点，执行一次，进入调试 Watch，观察：
++
++| 变量 | 新空白芯片首次初始化成功 | 正常第二次上电 | 异常情况 |
++|---|---:|---:|---|
++| `B3_Eeprom_Boot_OK` | 1 | 1 | 0 |
++| `Debug_Eep_Storage` | 1（有效 B3 标定） | 1 | 2 / 4 / 5 |
++| `Debug_Eep_Record` | 2（暂无记录） | 2；若已记录则通常 1 | 3 / 4 等 |
++| `Debug_Eep_Warnings` | 0 | 0 | 仍为 0（旧迁移已删除） |
++
++状态解释：`Storage=2` 非空无有效 B3 标定且被锁定；`Storage=4` 标定日志损坏；`Storage=5` 读写/I2C 异常。`Record=3` 是记录元数据损坏；`Record=4` 是 I2C 读取失败。这些状态都不可当成“芯片空白”直接覆盖。
++
++## 第三部分：必须完成的六组实机验证
++
++1. **首次初始化**：接入真正空白芯片，第一次上电应得到 Boot_OK=1、Storage=1；使用专用 I2C 工装读取 `0xE000` 与 `0xE080`，应看到 `GJB3` 魔数、有效 CRC 和各自 `0xA5` 提交标志。不能简单靠 Debug 变量证明双份物理写入成功。
++2. **重启不重写**：同一 EEPROM 再次断电上电，标定参数应从 EEPROM 读回且不被默认参数重写；可用 I2C 抓包或工装比对两个 64 字节快照，确认上电没有新写入。
++3. **人工标定持久化**：分别执行 CG/GJ/CH 标定，最后按存储键；每次成功蜂鸣后断电上电，使用 Watch 观察 `CG_Param`、`GJ_Param`、`CH_Param` 对应值，与保存值相符；修改密码再验证一次。标定操作必须使用标准器具。
++4. **非空白保护**：备用 EEPROM 的任意地址若存在未知非 `0xFF` 数据而校准区没有有效快照，则上电 Boot_OK 应为 0，Storage=2，且不应写入或清除任何字节。不得用实际客户芯片做破坏性实验。
++5. **写保护/掉电故障**：用专门测试样机验证 WP 阻止写入时不会报保存成功；在备用测试芯片上安排首次初始化或人工保存过程的受控掉电测试，复位后要么恢复有效副本，要么停止写入报错，不能出现“数据校验失败仍当成功”。
++6. **记录区域隔离**：通过测试调用 `Eep_Input_Node(index,node)` 顺序写入至 100 条，验证 `Eep_Get_Node_Count`、`Eep_Output_Node` 与清空接口；检查标定快照、记录数快照、记录数据互不覆盖，101 条应拒绝。注意现有用户界面并未自动调用 `Eep_Input_Node()`。
++
++## 第四部分：关于生产装配及故障芯片
++
++- 如果芯片不是严格全 `0xFF`，本版不会擅自把它当作新芯片。对已经确认可以删除的试产芯片，使用外部工装整片清空后再让新版固件初始化。
++- 如果检测到两份 B3 标定都坏，或读取失败，本版不自动覆盖疑似用户标定。应通过维护工装检修芯片及供电，不要通过强行设置旧服务宏绕过保护。
++- 如果单次初始写入中断，并且残留数据**完全符合**本版出厂初始快照且其他区域都为空，程序允许自动继续；不符合条件时不会尝试修复写入。
++
++**提醒**：EEPROM 启动错误时程序会尝试发出三声蜂鸣，但当前主界面仍可能显示 RAM 默认参数；此时不能把仪表视为已经标定合格，不得交付测量使用。
++
++**验收状态**：当前已进行主机端模拟测试，未进行实物 Keil 编译、烧录、抓包或掉电验收。以上步骤需由设备现场执行并记录通过结果后，才能标注“实机量产通过”。
+--- /dev/null
++++ V1.0.4_B31/B31_20261104_回归测试报告.md
+@@ -0,0 +1,50 @@
++# B3.1 EEPROM 代码静态检查与回归测试报告
++
++- **版本**：V1.0.4_B31 / 2026-11-04
++- **基线**：用户上传的 V1.0.3_B3
++- **测试环境**：Linux 主机 GCC C99，`-O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fstack-protector-all`，64 KiB 内存数组模拟 AT24C512；非 ARM/Keil、非真实 I2C 芯片。
++- **最终结果**：B3.1 **326 项断言通过**；B2 UART **41 项断言通过**。
++
++## B3.1 覆盖项目
++
++| 编号 | 检查项 | 模拟结果 |
++|---|---|---|
++| T01 | AT24C512 16位内部地址、128 字节分页、跨页拆写、越界拒绝、ACK 超时 | 通过 |
++| T02 | 初始全 64 KiB 为 `0xFF` 时触发初始化且完成两份标定副本 | 通过 |
++| T03 | 新芯片第二次启动只读恢复，不重复写入；编译期 RAM 默认值变化不覆盖 EEPROM | 通过 |
++| T04 | 64 KiB 任意未知字节存在时禁止自动初始化和标定/记录写入 | 通过 |
++| T05 | 首次 A 槽写入中断（不同写入阶段），合法中断镜像可恢复 | 通过 |
++| T06 | 中断镜像之外额外存在一个非空白字节时拒绝恢复 | 通过 |
++| T07 | 全片扫描中读取失败时禁止写入；WP 无效写入可由回读验证发现 | 通过 |
++| T08 | 默认标定参数不合法时拒绝首次写入 | 通过 |
++| T09 | CG/GJ/CH/密码分别保存，重启恢复互不串字段 | 通过 |
++| T10 | CRC 失效/提交标志错误时选用旧有效标定副本 | 通过 |
++| T11 | 保存过程部分写入失败、WP 只响应不真正编程时不更新 RAM 业务数据 | 通过 |
++| T12 | 记录追加、读取、逻辑清除、计数提交、断电回滚 | 通过 |
++| T13 | 100 条上限以及第 101 条拒绝，确保地址不溢出 | 通过 |
++| T14 | 记录计数 A/B 双副本 CRC 失效时拒绝按无效计数操作 | 通过 |
++| T15 | I2C 写入地址白名单：只允许记录数据区、标定双槽、记录数双槽；禁止旧区/越界写入 | 通过 |
++| T16 | 旧迁移宏值均为 0；旧读取/授权/导入/原始写接口不产生 EEPROM 写操作 | 通过 |
++
++原有 B2 主控通信回归在单独测试夹具中通过，包括 UART1/UART2 帧校验、异常帧、50,000 字节噪声和中断里不发送等测试。
++
++## 测试命令和通过输出
++
++```sh
++sh B31_HOST_TESTS/run_b31_tests.sh
++sh B2_HOST_TESTS/run_master_tests.sh
++```
++
++```text
++B3.1 EEPROM production tests: PASS 326 assertions; 64KiB blank scan, init recovery, A/B persistence, 100 records, nonblank lock, I2C/WP/powerloss, disjoint layout.
++B2 HOST: PASS 41 assertions; UART1 bad=181 dropped=1; UART2 bad=3; 50,000 noise bytes; no IRQ TX
++```
++
++## 明确没有做的验证
++
++- **没有**在当前环境执行 Keil ARM Compiler 5、整个 STM32L151 Keil 工程编译；无法声明 ARM 可执行文件已被本机重新构建。
++- **没有**连接实物 AT24C512、WP 引脚、I2C 分析仪或电源切换设备；无法声明硬件供电中断与寿命测试通过。
++- **没有**重新测量仪表精度，参数默认值不能代替每把尺的标定/检定。
++- 记录数据本体仍然没有逐条 CRC；模拟测试能验证写后回读和计数提交，不涵盖 EEPROM 老化后单条记录长期位翻转的检测。
++
++**结论**：B3.1 的 EEPROM 核心软件逻辑及与 B2 UART 的主机端回归通过；硬件量产验收仍需用户按操作说明在 Keil 和实际电路中完成。

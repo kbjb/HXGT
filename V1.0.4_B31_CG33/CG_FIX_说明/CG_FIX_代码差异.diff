@@ -1,0 +1,150 @@
+--- V1.0.4_B31/STM32L151/Core/Src/main.c
++++ V1.0.4_B31_CG_FIX/STM32L151/Core/Src/main.c
+@@ -135,6 +135,9 @@
+    * calibration and record journals are never rewritten during boot.
+    * No legacy EEPROM service or migration is enabled in production. */
+   B3_Eeprom_Boot_OK = Eep_Data_Get();
++  /* [CGFIX-01] Eep_Data_Get() may replace CG_Param with the saved snapshot.
++   * The dependent slope/intercept must be rebuilt before any measurement. */
++  CG_Data_Init();
+   Debug_Eep_Storage = Eep_Get_Storage_State();
+   Debug_Eep_Record = Eep_Get_Record_State();
+   Debug_Eep_Warnings = Eep_Get_Legacy_Warnings();
+--- V1.0.4_B31/STM32L151/Software/inc/algorithm_head.h
++++ V1.0.4_B31_CG_FIX/STM32L151/Software/inc/algorithm_head.h
+@@ -8,6 +8,8 @@
+ 
+ 
+ 
++/* [CGFIX-01] Rebuild the CG coefficients after EEPROM load or calibration. */
++void CG_Data_Init(void);
+ float Get_CG_Value(int16_t CG_Ad,float temp);
+ 
+ float Get_GJ_Value(uint16_t GJ_Ad,float temp);
+--- V1.0.4_B31/STM32L151/Software/inc/param_head.h
++++ V1.0.4_B31_CG_FIX/STM32L151/Software/inc/param_head.h
+@@ -198,6 +198,7 @@
+ extern uint8_t Percision_Menu_Select_History ;
+ extern uint8_t Data_Show_Percision ;
+ 
++extern uint8_t CG_Cal_Save_Failed; /* [CGFIX-03] */
+ extern uint8_t CG_Calibration_Status;
+ extern uint8_t CG_Calibration_Status_History;
+ 
+--- V1.0.4_B31/STM32L151/Software/src/App_code.c
++++ V1.0.4_B31_CG_FIX/STM32L151/Software/src/App_code.c
+@@ -4,6 +4,8 @@
+ #include "adc_head.h"
+ 
+ static PAGE_FUN_T Page_Fun_Buffere[page_size];
++/* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
++static uint8_t Main_Values_Need_Redraw = 1U;
+ 
+ 
+ 
+@@ -35,6 +37,7 @@
+ /*************************主界面***************************/
+ void Main_Page_Init(void)
+ {
++    Main_Values_Need_Redraw = 1U;
+     CG_Value_History = 0;
+     GJ_Value_History = 0;
+     left_And_Righe_Status_History = 1-left_And_Righe_Status;
+@@ -56,7 +59,7 @@
+     /*显示轨距数值*/
+     GJ_Value = Get_GJ_Value(GJ_Ad,Temp);
+     //获取轨距数据
+-    if(GJ_Value_History != GJ_Value)
++    if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)
+     {
+         if(Data_Show_Percision == 1)
+             snprintf(buffer,sizeof(buffer),"%+.2f",GJ_Value);
+@@ -69,7 +72,7 @@
+     /*显示超高数值*/
+     CG_Value = Get_CG_Value(CG_Ad,Temp);
+     //获取超高数据
+-    if(CG_Value_History != CG_Value)
++    if(Main_Values_Need_Redraw || CG_Value_History != CG_Value)
+     {
+         if(Data_Show_Percision == 1)
+             snprintf(buffer,sizeof(buffer),"%+07.2f",CG_Value);
+@@ -79,6 +82,7 @@
+         CG_Value_History  =  CG_Value;
+     }
+     
++    Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
+     /*显示时间*/
+     //获取时间数据
+     PCF8563_TimeTypeDef time;
+@@ -487,6 +491,7 @@
+ void CG_Calibration_Page_Init(void)
+ {
+     CG_Calibration_Status = 0;
++    CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
+ //    CG_Calibration_Tim_Current = 0;
+ //    CG_Calibration_Tim_History = 0;
+ }
+@@ -562,15 +567,20 @@
+             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+             break;
+         case 8:
++            /* [CGFIX-03] Collected four AD points, NOT saved yet. */
++            OLED_PrintChinese(32,1,"超高标定");
++            if(CG_Cal_Save_Failed)
++                OLED_PrintString(28,4,"EEP ERROR",FONT_8X16);
++            else
++                OLED_PrintChinese(24,4,"存储键保存");
++            break;
++        case 9:
++            /* Only reached after EEPROM CRC/readback commit succeeds. */
+             OLED_PrintChinese(32,1,"超高标定");
+             OLED_PrintChinese(48,4,"成功");
+-//            CG_Calibration_Tim_Current = HAL_GetTick();
+-//            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
+-//            {
+-//            }
+-            break;
+-        case 9:
+-             set_PageId(page_calibration_menu);
++            break;
++        case 10:
++            set_PageId(page_calibration_menu);
+             break;
+     }
+ }
+--- V1.0.4_B31/STM32L151/Software/src/App_key.c
++++ V1.0.4_B31_CG_FIX/STM32L151/Software/src/App_key.c
+@@ -2,6 +2,7 @@
+ #include "pcf8563_head.h"
+ #include "key_head.h"
+ #include "App_Eep.h"
++#include "Algorithm_head.h" /* [CGFIX-01] */
+ 
+ 
+ 
+@@ -324,9 +325,15 @@
+             if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
+             {
+                 CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
++                CG_Cal_Save_Failed = 1U; /* [CGFIX-03] Do not claim success. */
++                CG_Calibration_Status_History = 0xFFU; /* force OLED_Clear() */
+                 Beep_Ctrl(100,3);
+                 return;
+             }
++            /* [CGFIX-01] Eep_Save_CG_Calibration updates CG_Param only
++             * after verified commit. Recompute K/B for immediate use. */
++            CG_Data_Init();
++            CG_Cal_Save_Failed = 0U;
+             Beep_Ctrl(100,1);
+             break;
+     }
+--- V1.0.4_B31/STM32L151/Software/src/param_code.c
++++ V1.0.4_B31_CG_FIX/STM32L151/Software/src/param_code.c
+@@ -53,6 +53,7 @@
+ uint8_t Percision_Menu_Select_History = 1;      //精度设置界面  上一次选择精度项
+ uint8_t Data_Show_Percision = 1;                //精度设置界面  当前设置精度  0：精度1    1：精度2
+ 
++uint8_t CG_Cal_Save_Failed = 0;                 // [CGFIX-03] EEPROM write failure displayed explicitly
+ uint8_t CG_Calibration_Status = 0;              //超高标定界面  当前超高标定步骤
+ uint8_t CG_Calibration_Status_History = 1;      //超高标定界面  上一次超高标定步骤
+ 
