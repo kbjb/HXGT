@@ -13,7 +13,39 @@
 
 // 显示缓冲区
 static uint8_t oled_buffer[OLED_PAGE_NUM][OLED_WIDTH];
-static volatile uint8_t dma_ready = 1;
+static uint8_t oled_fault;
+static uint32_t oled_fault_tick;
+
+/* Foreground only. A failed SPI transfer must never hang the measurement loop. */
+#define OLED_SPI_TIMEOUT_MS 10U
+#define OLED_RETRY_PERIOD_MS 100U
+
+static void OLED_Transfer(uint8_t is_data, uint8_t *data, uint16_t size)
+{
+    HAL_StatusTypeDef status;
+    if (oled_fault || size == 0U) return;
+    if (is_data) OLED_DC_DATA();
+    else OLED_DC_CMD();
+    OLED_CS_LOW();
+    status = HAL_SPI_Transmit(&OLED_SPI_HANDLE, data, size, OLED_SPI_TIMEOUT_MS);
+    OLED_CS_HIGH();
+    if (status != HAL_OK)
+    {
+        oled_fault_tick = HAL_GetTick();
+        oled_fault = 1U;
+    }
+}
+
+uint8_t OLED_HasFault(void) { return oled_fault; }
+
+uint8_t OLED_TryRecover(void)
+{
+    if (!oled_fault) return 1U;
+    if ((uint32_t)(HAL_GetTick() - oled_fault_tick) < OLED_RETRY_PERIOD_MS)
+        return 0U;
+    OLED_Init();
+    return (uint8_t)(!oled_fault);
+}
 
 // SSD1309初始化命令序列[6](@ref)
 const uint8_t oled_init_cmds[] = {
@@ -33,33 +65,10 @@ const uint8_t oled_init_cmds[] = {
 };
 
 // 发送命令[5](@ref)
-void OLED_WriteCommand(uint8_t cmd) {
-    while(!dma_ready);  // 等待DMA就绪
-    OLED_DC_CMD();
-    OLED_CS_LOW();
-    HAL_SPI_Transmit(&OLED_SPI_HANDLE, &cmd, 1, 100);
-    OLED_CS_HIGH();
-}
+void OLED_WriteCommand(uint8_t cmd) { OLED_Transfer(0U, &cmd, 1U); }
 
-// 发送数据(阻塞)
-void OLED_WriteData(uint8_t data) {
-    OLED_DC_DATA();
-    OLED_CS_LOW();
-    HAL_SPI_Transmit(&OLED_SPI_HANDLE, &data, 1, 100);
-    OLED_CS_HIGH();
-}
+void OLED_WriteData(uint8_t data) { OLED_Transfer(1U, &data, 1U); }
 
-// DMA发送数据[1](@ref)
-void OLED_WriteData_DMA(uint8_t *data, uint16_t size) {
-    if(size == 0 || !dma_ready) return;
-    
-    dma_ready = 0;
-    OLED_DC_DATA();
-    OLED_CS_LOW();
-    HAL_SPI_Transmit_DMA(&OLED_SPI_HANDLE, data, size);
-}
-
-// 设置光标位置
 void OLED_SetCursor(uint8_t page, uint8_t col) {
     OLED_WriteCommand(0xB0 + page);      // 设置页地址
     OLED_WriteCommand(col & 0x0F);       // 设置列低地址
@@ -68,6 +77,7 @@ void OLED_SetCursor(uint8_t page, uint8_t col) {
 
 // 初始化OLED[6](@ref)
 void OLED_Init(void) {
+    oled_fault = 0U;
     // 硬件复位
     OLED_RESET_LOW();
     HAL_Delay(10);
@@ -79,7 +89,6 @@ void OLED_Init(void) {
         OLED_WriteCommand(oled_init_cmds[i]);
     }
     OLED_Clear();
-    dma_ready = 1;
 }
 
 // 清屏
@@ -431,29 +440,12 @@ void OLED_ShowImage(int16_t x, int16_t y, uint8_t width, uint8_t height, const u
 
 
 // 刷新整个显示缓冲区(使用DMA)
-void OLED_Refresh(void) {
-    if(!dma_ready) return;
-    
-    for(uint8_t page = 0; page < OLED_PAGE_NUM; page++) {
-        OLED_SetCursor(page, 0);
-        OLED_WriteData_DMA(oled_buffer[page], OLED_WIDTH);
-        while(!dma_ready);  // 等待DMA完成
+void OLED_Refresh(void)
+{
+    uint8_t page;
+    for (page = 0U; page < OLED_PAGE_NUM && !oled_fault; ++page)
+    {
+        OLED_SetCursor(page, 0U);
+        OLED_Transfer(1U, oled_buffer[page], OLED_WIDTH);
     }
 }
-
-// 检查DMA状态
-uint8_t OLED_IsDMAReady(void) {
-    return dma_ready;
-}
-
-// DMA传输完成回调函数[1](@ref)
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) {
-    if(hspi->Instance == SPI2) {
-        OLED_CS_HIGH();
-        dma_ready = 1;
-    }
-}
-
-
-
-

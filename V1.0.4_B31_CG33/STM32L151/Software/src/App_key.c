@@ -282,6 +282,26 @@ void Password_Set_Confirm(void)
 }
 
 extern I2C_HandleTypeDef hi2c2;
+/* The UI's two-digit year is 2000..2099 (century flag 0).
+ * Count from 2000-01-01, a Saturday, to generate the RTC weekday. */
+static uint8_t Prepare_RTC_Time(PCF8563_TimeTypeDef *t)
+{
+    static const uint8_t days_in_month[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    uint32_t days;
+    uint8_t m, limit, leap;
+    if (t->year > 99U || t->month < 1U || t->month > 12U ||
+        t->hour > 23U || t->minute > 59U || t->second > 59U) return 0U;
+    leap = (t->year % 4U == 0U);
+    limit = (uint8_t)(days_in_month[t->month - 1U] + (t->month == 2U && leap));
+    if (t->day < 1U || t->day > limit) return 0U;
+    days = 365UL * t->year + ((t->year + 3U) / 4U);
+    for (m = 1U; m < t->month; ++m)
+        days += days_in_month[m - 1U] + (m == 2U && leap);
+    t->weekday = (uint8_t)((days + t->day - 1U + 6U) % 7U);
+    t->century = 0U;
+    return 1U;
+}
+
 void Change_Time_For_Set_Time(void)
 {
     PCF8563_TimeTypeDef time;
@@ -291,7 +311,7 @@ void Change_Time_For_Set_Time(void)
     time.hour = Set_Time[3];
     time.minute = Set_Time[4];
     time.second = Set_Time[5];
-    if(PCF8563_SetTime(&hi2c2,&time) == HAL_OK)
+    if(Prepare_RTC_Time(&time) && PCF8563_SetTime(&hi2c2,&time) == HAL_OK)
     {
         Beep_Ctrl(100,1);
         set_PageId(page_menu);

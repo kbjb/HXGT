@@ -1,4 +1,5 @@
 #include "App_oled.h"
+#include <string.h>
 #include "pcf8563_head.h"
 #include "Algorithm_head.h"
 #include "agreement_head.h" /* [CG32-04] sensor-frame freshness */
@@ -9,6 +10,7 @@ static PAGE_FUN_T Page_Fun_Buffere[page_size];
 /* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
 static uint8_t Main_Values_Need_Redraw = 1U;
 static uint8_t CG_Display_Status_History = 0xFFU;
+static uint8_t GJ_Display_Status_History = 0xFFU;
 
 
 
@@ -30,7 +32,7 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"V1.0.1",FONT_8X16);
+    OLED_PrintString(40,4,"CG34-RC1",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
@@ -42,6 +44,7 @@ void Main_Page_Init(void)
 {
     Main_Values_Need_Redraw = 1U;
     CG_Display_Status_History = 0xFFU;
+    GJ_Display_Status_History = 0xFFU;
     CG_Value_History = 0;
     GJ_Value_History = 0;
     left_And_Righe_Status_History = 1-left_And_Righe_Status;
@@ -53,6 +56,43 @@ void Main_Page_Init(void)
 
 
 extern I2C_HandleTypeDef hi2c2;
+
+/* Shared main/CH header: at most one RTC transaction per second, and
+ * redraw the header on page entry or on visible clock/status changes. */
+static uint32_t RTC_LastPoll;
+static uint8_t RTC_Polled;
+static uint8_t RTC_HeaderRedraw = 1U;
+static char RTC_Header[16];
+
+static void RTC_ReflashHeader(void)
+{
+    uint32_t now = HAL_GetTick();
+    if (!RTC_Polled || (uint32_t)(now - RTC_LastPoll) >= 1000U)
+    {
+        PCF8563_TimeTypeDef time;
+        char next[sizeof(RTC_Header)] = "RTC ERR       ";
+        RTC_LastPoll = now;
+        RTC_Polled = 1U;
+        if (PCF8563_GetTime(&hi2c2, &time) == HAL_OK &&
+            time.year <= 99U && time.month >= 1U && time.month <= 12U &&
+            time.day >= 1U && time.day <= 31U && time.hour < 24U &&
+            time.minute < 60U)
+            snprintf(next, sizeof(next), "%02u/%02u/%02u %02u:%02u",
+                     (unsigned)time.year, (unsigned)time.month, (unsigned)time.day,
+                     (unsigned)time.hour, (unsigned)time.minute);
+        if (strcmp(RTC_Header, next) != 0)
+        {
+            strcpy(RTC_Header, next);
+            RTC_HeaderRedraw = 1U;
+        }
+    }
+    if (RTC_HeaderRedraw)
+    {
+        OLED_PrintString(5, 0, RTC_Header, FONT_6X8);
+        RTC_HeaderRedraw = 0U;
+    }
+}
+
 static int8_t  Power_0_Ico_Show_Timer_Status = 0;
 static uint16_t Power_Ico_Show_Timer_Freq = 5000;
 static uint32_t Power_Ico_Show_Timer_History = 0;
@@ -60,27 +100,34 @@ static uint32_t Power_Ico_Show_Timer_Now = 0;
 void Main_Page_Reflash(void)
 {
     char buffer[20];
-    /*显示轨距数值*/
-    GJ_Value = Get_GJ_Value(GJ_Ad,Temp);
-    //获取轨距数据
-    if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)
+    uint8_t fresh = Sensor_Data_Is_Fresh();
+    uint8_t eep_valid = (uint8_t)(Eep_Get_Storage_State() == EEP_STATE_B3_VALID);
+    uint8_t gj_state;
+    GJ_Value = Get_GJ_Value(GJ_Ad, Temp);
+    gj_state = !eep_valid ? CG_RESULT_EEP_ERROR :
+               (!fresh ? CG_RESULT_NO_SENSOR :
+                (GJ_Result_Is_Valid() ? CG_RESULT_OK : CG_RESULT_CAL_ERROR));
+    if (Main_Values_Need_Redraw || GJ_Display_Status_History != gj_state ||
+        (gj_state == CG_RESULT_OK && GJ_Value_History != GJ_Value))
     {
-        if(Data_Show_Percision == 1)
-            snprintf(buffer,sizeof(buffer),"%+.2f",GJ_Value);
+        OLED_PrintString(52,2,"         ",FONT_8X16);
+        if (gj_state == CG_RESULT_OK)
+            snprintf(buffer,sizeof(buffer),Data_Show_Percision == 1 ? "%+.2f" : "%+.1f",GJ_Value);
         else
-            snprintf(buffer,sizeof(buffer),"%+.1f",GJ_Value);
+            snprintf(buffer,sizeof(buffer),"%s",gj_state == CG_RESULT_EEP_ERROR ? "EEP ERR" :
+                     (gj_state == CG_RESULT_NO_SENSOR ? "NO SENSOR" : "CAL ERROR"));
         OLED_PrintString(52,2,buffer,FONT_8X16);
-        GJ_Value_History  =  GJ_Value;
+        GJ_Display_Status_History = gj_state;
+        GJ_Value_History = GJ_Value;
     }
-    
-    /*显示超高数值*/
+
     /* [CG32-04] Error status takes precedence over a numeric zero.
      * Leave the raw CG_Ad and CG_Value_t available in Keil Watch. */
     CG_Value = Get_CG_Value(CG_Ad,Temp);
     {
         uint8_t state = CG_Result_Status;
-        if (!Sensor_Data_Is_Fresh()) state = CG_RESULT_NO_SENSOR;
-        if (Eep_Get_Storage_State() != EEP_STATE_B3_VALID)
+        if (!fresh) state = CG_RESULT_NO_SENSOR;
+        if (!eep_valid)
             state = CG_RESULT_EEP_ERROR;
         if (Main_Values_Need_Redraw ||
             CG_Display_Status_History != state ||
@@ -115,10 +162,7 @@ void Main_Page_Reflash(void)
     Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
     /*显示时间*/
     //获取时间数据
-    PCF8563_TimeTypeDef time;
-    PCF8563_GetTime(&hi2c2,&time);
-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
-    OLED_PrintString(5,0,buffer,FONT_6X8);
+    RTC_ReflashHeader();
     
     
     Power_Ico_Show_Timer_Now =HAL_GetTick();
@@ -163,7 +207,7 @@ void Main_Page_Reflash(void)
         {
             Beep_Ctrl(100,3);
         }
-        if(GJ_Value>Goal_CJ_Min_Value&&GJ_Value<Goal_CJ_Max_Value)
+        if(gj_state == CG_RESULT_OK && GJ_Value>Goal_CJ_Min_Value&&GJ_Value<Goal_CJ_Max_Value)
         {
             Beep_Ctrl(100,3);
         }
@@ -190,122 +234,69 @@ void Main_Page_Reflash(void)
 
 /*************************查照护背界面***************************/
 
-static float CZ_Value_S = 0,HB_Value_S = 0;
 void CH_Page_Init(void)
 {
-    CZ_Value_S = 0,HB_Value_S = 0;
     OLED_PrintChinese(5,2,"查照");
     OLED_PrintString(44,2,":",FONT_8X16);
     OLED_PrintChinese(5,5,"护背");
     OLED_PrintString(44,5,":",FONT_8X16);
+    /* This checkout has no live CZ/HB producers. Never show demo numbers. */
+    OLED_PrintString(52,2,"NOT READY",FONT_8X16);
+    OLED_PrintString(52,5,"NOT READY",FONT_8X16);
 }
 
 
 void CH_Page_Reflash(void)
 {
-    char buffer[20];
-    
-    /*显示轨距数值*/
-    //获取查照数据
-    if(CZ_Value_S != CZ_Value)
-    {
-        if(Data_Show_Percision == 1)
-            snprintf(buffer,sizeof(buffer),"%+.2f",CZ_Value);
-        else
-            snprintf(buffer,sizeof(buffer),"%+.1f",CZ_Value);
-        OLED_PrintString(52,2,buffer,FONT_8X16);
-        CZ_Value_S  =  CZ_Value;
-    }
-    /*显示超高数值*/
-    //获取护背数据
-    if(HB_Value_S != HB_Value)
-    {
-        if(Data_Show_Percision == 1)
-            snprintf(buffer,sizeof(buffer),"%+.2f",HB_Value);
-        else
-            snprintf(buffer,sizeof(buffer),"%+.1f",HB_Value);
-        OLED_PrintString(52,5,buffer,FONT_8X16);
-        HB_Value_S  =  HB_Value;
-    }
-    /*显示时间*/
-    //获取时间数据
-    PCF8563_TimeTypeDef time;
-    PCF8563_GetTime(&hi2c2,&time);
-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
-    OLED_PrintString(5,0,buffer,FONT_6X8);
+    RTC_ReflashHeader();
     /*显示电量数据*/
     OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
 }
 
 /************************菜单选择界面***************************/
 
-static int8_t  menu_Show_Start;
-char Menu_buffer[MENU_ID_NUMBER][8] = {"时间设置","目标设置","标定设置","密码设置","精度设置"};
-void Menu_Page_Init(void)
+/* Four two-byte GBK glyphs plus a terminating NUL per menu label. */
+static char Menu_buffer[MENU_ID_NUMBER][9] = {"时间设置","目标设置","标定设置","密码设置","精度设置"};
+static void Menu_Draw_Labels(uint8_t first)
 {
-    char buffer[8];
-    menu_Id_History = 0;
-    menu_Id_Select = 0;
-    menu_Show_Start  = 0;
-    OLED_PrintString(16,1,"->",FONT_8X16);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[0][i];
-    OLED_PrintChinese(32,1,buffer);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[1][i];
-    OLED_PrintChinese(32,3,buffer);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[2][i];
-    OLED_PrintChinese(32,5,buffer);
+    uint8_t row;
+    for (row = 0U; row < 3U; ++row)
+        OLED_PrintChinese(32U, (uint8_t)(1U + 2U * row), Menu_buffer[first + row]);
 }
 
+void Menu_Page_Init(void)
+{
+    menu_Id_History = 0U;
+    menu_Id_Select = 0U;
+    OLED_PrintString(16,1,"->",FONT_8X16);
+    Menu_Draw_Labels(0U);
+}
 
 void Menu_Page_Reflash(void)
 {
-    char buffer[8];
-    if(menu_Id_History != menu_Id_Select)
-    {
-        if(menu_Id_Select>MENU_ID_NUMBER)menu_Id_Select = MENU_ID_NUMBER;
-        OLED_PrintString(16,1,"  ",FONT_8X16);
-        OLED_PrintString(16,3,"  ",FONT_8X16);
-        OLED_PrintString(16,5,"  ",FONT_8X16);
-        if(menu_Id_Select>2)
-        {
-            menu_Show_Start = menu_Id_Select-2;
-            OLED_PrintString(16,5,"->",FONT_8X16);
-        }
-        else
-        {
-            menu_Show_Start = 0;
-            OLED_PrintString(16,(menu_Id_Select<<1)+1,"->",FONT_8X16);
-        }
-//        OLED_PrintChinese(32,1,Menu_buffer[menu_start]);
-//        OLED_PrintChinese(32,3,Menu_buffer[menu_start+1]);
-//        OLED_PrintChinese(32,5,Menu_buffer[menu_start+2]);
-        
-        
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start][i];
-        OLED_PrintChinese(32,1,buffer);
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start+1][i];
-        OLED_PrintChinese(32,3,buffer);
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start+2][i];
-        OLED_PrintChinese(32,5,buffer);
-        
-        
-        menu_Id_History = menu_Id_Select;
-    }
-    
+    uint8_t first;
+    if (menu_Id_Select >= MENU_ID_NUMBER) menu_Id_Select = MENU_ID_NUMBER - 1U;
+    if (menu_Id_History == menu_Id_Select) return;
+    first = (menu_Id_Select > 2U) ? (uint8_t)(menu_Id_Select - 2U) : 0U;
+    OLED_PrintString(16,1,"  ",FONT_8X16);
+    OLED_PrintString(16,3,"  ",FONT_8X16);
+    OLED_PrintString(16,5,"  ",FONT_8X16);
+    OLED_PrintString(16, (uint8_t)(1U + 2U * (menu_Id_Select - first)), "->", FONT_8X16);
+    Menu_Draw_Labels(first);
+    menu_Id_History = menu_Id_Select;
 }
 
 /************************时间设置界面***************************/
 
 void Time_Set_Page_Init(void)
 {
-    PCF8563_TimeTypeDef timeT;
-    PCF8563_GetTime(&hi2c2,&timeT);
+    PCF8563_TimeTypeDef timeT = {0};
+    if (PCF8563_GetTime(&hi2c2,&timeT) != HAL_OK)
+    {
+        /* Initialize an editable date rather than showing stack garbage. */
+        timeT.month = 1U;
+        timeT.day = 1U;
+    }
     OLED_PrintString(9,2,"Y",FONT_8X16);
     OLED_PrintString(49,2,"M",FONT_8X16);
     OLED_PrintString(89,2,"D",FONT_8X16);
@@ -750,12 +741,18 @@ void oled_Reflash(void)
 {
     PAGE_ID            page_id = get_PageId();
     static PAGE_FUN_T  page_fun;
+    if (OLED_HasFault())
+    {
+        if (!OLED_TryRecover()) return;
+        Page_Id_History = page_size; /* redraw all fields after re-init */
+    }
     
     if(page_id != Page_Id_History)
     {
         //更新页面
         page_fun = Page_Fun_Buffere[page_id];
         Page_Id_History = page_id;
+        RTC_HeaderRedraw = 1U;
         //清除屏幕
         OLED_Clear();
         //刷新初始界面

@@ -19,7 +19,10 @@ extern volatile uint8_t CG_Result_Status;
 void CG_Data_Init(void);
 float Get_CG_Value(int16_t CG_Ad,float temp);
 
+/* GJ validity pertains to the last calculation; check link/storage separately.
+ * Never display or export the 0.0f error sentinel as a measurement. */
 float Get_GJ_Value(uint16_t GJ_Ad,float temp);
+uint8_t GJ_Result_Is_Valid(void);
 
 
 uint8_t Get_Driver_Power(uint16_t PowerAd);

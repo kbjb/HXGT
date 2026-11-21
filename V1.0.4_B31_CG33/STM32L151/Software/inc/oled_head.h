@@ -28,14 +28,15 @@ void OLED_Clear(void);
 void OLED_SetCursor(uint8_t page, uint8_t col);
 void OLED_WriteCommand(uint8_t cmd);
 void OLED_WriteData(uint8_t data);
-void OLED_WriteData_DMA(uint8_t *data, uint16_t size);
+uint8_t OLED_HasFault(void);
+uint8_t OLED_TryRecover(void);
 void OLED_PrintChar(uint8_t x, uint8_t y, char ch, uint8_t font_size);
 void OLED_PrintString(uint8_t x, uint8_t y, char *str, uint8_t font_size);
 void OLED_PrintChinese(uint8_t x, uint8_t y, char* str);
 //void OLED_ShowImage(const uint8_t *img);
 void OLED_ShowImage(int16_t x, int16_t y, uint8_t width, uint8_t height, const uint8_t *img_data);
 void OLED_Refresh(void);
-uint8_t OLED_IsDMAReady(void);
+
 
 
 void OLED_PrintLine(uint8_t start_x, uint8_t end_x,uint8_t y,uint8_t data);

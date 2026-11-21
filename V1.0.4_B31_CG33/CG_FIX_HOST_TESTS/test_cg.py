@@ -25,7 +25,8 @@ assert 'CG_Param = c->cg;' in eep and 'B3_CalibrationToGlobals(new_data);' in ee
 assert 'CG_Display_Status_History != state' in display
 assert 'CG_Result_Status' in display and 'CG RANGE' not in display
 assert 'CG_MAX_MEASURE_MM' not in algo and 'CG_Calibration_Sane' in algo
-assert 'if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)' in display
+assert 'GJ_Display_Status_History != gj_state' in display
+assert 'gj_state == CG_RESULT_OK && GJ_Value_History != GJ_Value' in display
 assert 'Main_Values_Need_Redraw = 1U;' in display
 assert 'Main_Values_Need_Redraw = 0U;' in display
 cg_section = display[display.index('void CG_Calibration_Page_Reflash(void)'):display.index('void GJ_Calibration_Page_Init(void)')]

@@ -81,35 +81,38 @@ float Get_CG_Value(int16_t adc_value, float temp)
 }
 
 
-float Get_GJ_Value(uint16_t GJ_Ad,float temp)
+static uint8_t GJ_Result_Valid = 0U;
+
+uint8_t GJ_Result_Is_Valid(void)
 {
-    float x1 = (float)GJ_Param.GJ_1410_Ad;
-    float y1 = 1410.0f;
-    float x2 = (float)GJ_Param.GJ_1435_Ad;
-    float y2 = 1435.0f;
-    float x3 = (float)GJ_Param.GJ_1470_Ad;
-    float y3 = 1470.0f;
+    return GJ_Result_Valid;
+}
 
-    // 计算线性回归参数：y = k * x + b
-    float sumX = x1 + x2 + x3;
-    float sumY = y1 + y2 + y3;
-    float sumXY = x1 * y1 + x2 * y2 + x3 * y3;
-    float sumX2 = x1 * x1 + x2 * x2 + x3 * x3;
+float Get_GJ_Value(uint16_t GJ_Ad, float temp)
+{
+    int32_t x1 = GJ_Param.GJ_1410_Ad;
+    int32_t x2 = GJ_Param.GJ_1435_Ad;
+    int32_t x3 = GJ_Param.GJ_1470_Ad;
+    float d21, d31, d32, slope, centered, value;
 
-    int n = 3;
-    float denominator = n * sumX2 - sumX * sumX;
-    // 防止分母为零（理论上不会发生，因三点不共线时分母非零）
-    if (denominator == 0.0f) {
-        // 退化为使用中点参考值，实际应用中应根据需求处理
-        return (y1 + y2 + y3) / n;
-    }
+    (void)temp; /* There is no experimentally established GJ thermal model. */
+    GJ_Result_Valid = 0U;
+    /* As in EEPROM validation, either sensor direction is permitted, but
+     * equal or nonmonotonic points cannot calibrate this measurement. */
+    if (!((x1 < x2 && x2 < x3) || (x1 > x2 && x2 > x3)))
+        return 0.0f; /* Error sentinel, NOT a gauge reading. */
 
-    float k = (n * sumXY - sumX * sumY) / denominator;
-    float b = (sumY - k * sumX) / n;
-
-    // 计算实时AD值对应的长度
-    GJ_Value = k * GJ_Ad + b;
-    return GJ_Value;
+    d21 = (float)(x2 - x1);
+    d31 = (float)(x3 - x1);
+    d32 = (float)(x3 - x2);
+    /* Least-squares covariance/variance via pairwise differences:
+     * identical model, without subtracting large near-equal numbers. */
+    slope = (25.0f * d21 + 60.0f * d31 + 35.0f * d32) /
+            (d21*d21 + d31*d31 + d32*d32);
+    centered = (float)((int32_t)GJ_Ad - x2) - (d32 - d21) / 3.0f;
+    value = (4315.0f / 3.0f) + slope * centered;
+    GJ_Result_Valid = 1U;
+    return value;
 }
 
 
