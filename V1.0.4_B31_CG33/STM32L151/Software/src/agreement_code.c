@@ -206,53 +206,82 @@ uint8_t UART2_PC_Change_Data_Mode(AGREEMEN_PARAM * AgreementParam)
     AgreementParam->dataNumber = 0;
     return 1;
 }
-uint8_t UART2_PC_Get_All_Eep(AGREEMEN_PARAM * AgreementParam)
+/* Stage a full legacy reply before sending its header. Each service call
+ * performs at most one read or one bounded TX, never both, so measurement
+ * and UART1 processing run between slices. Buffer is foreground-only. */
+#define BULK_RECORD_BYTES ((uint16_t)sizeof(EEP_NODE))
+static uint8_t Bulk_Buffer[7U + MAX_INDEX_ADDR * sizeof(EEP_NODE)];
+static uint8_t Bulk_State;
+static uint16_t Bulk_Count, Bulk_Index, Bulk_Length, Bulk_Offset;
+static uint8_t Bulk_Checksum;
+
+uint8_t UART2_PC_Bulk_Is_Busy(void) { return (uint8_t)(Bulk_State != 0U); }
+
+static void UART2_PC_Bulk_Finalize(uint8_t cmd, uint16_t payload_len)
 {
-    uint16_t number = 0, size;
-    uint32_t sum = 0;
-    /* [B3] Only use validated B3 metadata, not the overlapped legacy count. */
-    if (!Eep_Get_Node_Count(&number)) return 0;
-    if (number > MAX_INDEX_ADDR ||
-        (uint32_t)number * sizeof(EEP_NODE) > 65535UL) return 0;
-    size = (uint16_t)((uint32_t)number * sizeof(EEP_NODE));
-    //和
-    sum+=0x5A;
-    sum+=AgreementParam->cmd;
-    sum+=(size>>8)&0xFF;
-    sum+=size&0xFF;
-    
-    AgreementParam->CmdBuffer[0] = 0x5A;//发送帧头和应答码
-    AgreementParam->CmdBuffer[1] = AgreementParam->cmd;
-    AgreementParam->CmdBuffer[2] = (size>>8)&0xFF;//发送数据个数
-    AgreementParam->CmdBuffer[3] = size&0xFF;
-    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,4);
-    //发送数据
-    for(uint16_t i=0;i<number;i++)
-    {
-        //获取存储节点数据
-        if (Eep_Output_Node(i, AgreementParam->CmdBuffer) != 0)
-            return 0; /* [B2] Stop streaming on read failure. */
-        //累加存储节点数据值
-        for(uint8_t j=0;j<sizeof(EEP_NODE);j++)
-            sum += AgreementParam->CmdBuffer[j];
-        //发送存储节点数据
-        UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,sizeof(EEP_NODE));
-    }
-    //校验
-    AgreementParam->CmdBuffer[0] = sum&0x000000FF;
-    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,1);
-    //帧尾
-    AgreementParam->CmdBuffer[0] = 0x0D;
-    AgreementParam->CmdBuffer[1] = 0x0A;
-    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,2);
-    
-    
-    return 1;
+    Bulk_Buffer[0] = 0x5AU;
+    Bulk_Buffer[1] = cmd;
+    Bulk_Buffer[2] = (uint8_t)(payload_len >> 8);
+    Bulk_Buffer[3] = (uint8_t)payload_len;
+    Bulk_Buffer[4U + payload_len] = (uint8_t)(Bulk_Checksum +
+          Bulk_Buffer[0] + Bulk_Buffer[1] + Bulk_Buffer[2] + Bulk_Buffer[3]);
+    Bulk_Buffer[5U + payload_len] = 0x0DU;
+    Bulk_Buffer[6U + payload_len] = 0x0AU;
+    Bulk_Length = (uint16_t)(payload_len + 7U);
+    Bulk_Offset = 0U;
+    Bulk_State = 2U;
 }
 
+static uint8_t UART2_PC_Get_All_Eep(void)
+{
+    uint16_t count;
+    if (Bulk_State != 0U || !Eep_Get_Node_Count(&count) || count > MAX_INDEX_ADDR)
+        return 0U;
+    Bulk_Count = count;
+    Bulk_Index = 0U;
+    Bulk_Checksum = 0U;
+    Bulk_State = 1U;
+    return 1U;
+}
 
-
-
+void UART2_PC_Bulk_Service(void)
+{
+    if (Bulk_State == 1U)
+    {
+        if (Bulk_Index < Bulk_Count)
+        {
+            uint16_t j;
+            uint8_t *dst = &Bulk_Buffer[4U + Bulk_Index * BULK_RECORD_BYTES];
+            if (Eep_Output_Node(Bulk_Index, dst) != 0U)
+            {
+                Bulk_Checksum = 0U;
+                UART2_PC_Bulk_Finalize(UART2_PC_GET_ALL_EEP_DATA_ACK | 0x40U, 0U);
+                return;
+            }
+            for (j = 0U; j < BULK_RECORD_BYTES; ++j)
+                Bulk_Checksum = (uint8_t)(Bulk_Checksum + dst[j]);
+            ++Bulk_Index;
+        }
+        if (Bulk_Index == Bulk_Count)
+            UART2_PC_Bulk_Finalize(UART2_PC_GET_ALL_EEP_DATA_ACK,
+                                   (uint16_t)(Bulk_Count * BULK_RECORD_BYTES));
+        return;
+    }
+    if (Bulk_State == 2U)
+    {
+        uint16_t len = (uint16_t)(Bulk_Length - Bulk_Offset);
+        if (len > UART_TX_BUFFER_SIZE) len = UART_TX_BUFFER_SIZE;
+        if (!UART_Try_Send_Data(UART2_ID, &Bulk_Buffer[Bulk_Offset], len))
+        {
+            /* Physical TX failure may already have emitted bytes. Do not
+             * append a second frame to the truncated reply; host retries. */
+            Bulk_State = 0U;
+            return;
+        }
+        Bulk_Offset = (uint16_t)(Bulk_Offset + len);
+        if (Bulk_Offset == Bulk_Length) Bulk_State = 0U;
+    }
+}
 
 
 /* [B2] Validate command and its exact request payload before dispatch.
@@ -388,7 +417,7 @@ void Agreement_Ack_For_Fun(void)
             }
             break;
         case UART2_PC_GET_ALL_EEP_DATA_ACK:
-            if (UART2_PC_Get_All_Eep(&CmdParam) != 0)
+            if (UART2_PC_Get_All_Eep() != 0)
                 goto Uart_Rest;
             CmdParam.cmd |= (1U << 6);
             CmdParam.dataNumber = 0;

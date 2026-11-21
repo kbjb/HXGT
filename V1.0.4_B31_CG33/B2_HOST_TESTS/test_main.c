@@ -23,6 +23,9 @@ static size_t ntx1 = 0, ntx2 = 0;
 static uint32_t tx_in_isr = 0;
 static uint8_t in_isr = 0;
 static uint32_t tests = 0;
+static int eep_fail_index = -1;
+static unsigned eep_reads;
+static int fail_uart2, uart2_tx_calls;
 
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *u, uint8_t *buf, uint16_t len) {
     assert(len == 1);
@@ -40,6 +43,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16
     assert(timeout != 0xFFFFFFFFUL);
     if(in_isr) tx_in_isr++;
     if (u == &huart1) {p=tx1; n=&ntx1;} else {p=tx2; n=&ntx2;}
+    if (u == &huart2) { ++uart2_tx_calls; if (fail_uart2) return HAL_TIMEOUT; }
     assert((*n)+len<100000);
     memcpy(p+*n, data, len);
     *n+=len;
@@ -66,6 +70,8 @@ uint8_t Eep_Get_Node_Count(uint16_t *count) {
 }
 uint8_t Eep_Output_Node(uint16_t index, void *out) {
     uint8_t *p=(uint8_t*)out; unsigned i;
+    ++eep_reads;
+    if ((int)index == eep_fail_index) return 1U;
     for(i=0;i<sizeof(EEP_NODE);i++) p[i]=(uint8_t)(0xA0U + i + index);
     return 0;
 }
@@ -129,6 +135,10 @@ int main(void) {
     fake_tick=1500; CHECK(!Sensor_Data_Is_Fresh());
     u1(15123,-1,-2.5f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
     CHECK(GJ_Ad==15123 && CG_Ad==-1 && Temp==-2.5f);
+    u1(0xFFFFU,-1234,22.0f,g); feed(&huart1,g,13); UART_Process_Received(UART1_ID);
+    CHECK(Sensor_Data_Is_Fresh() && GJ_Ad==0xFFFFU && CG_Ad==-1234 && Temp==22.0f);
+    feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+    CHECK(Sensor_Data_Is_Fresh() && GJ_Ad==15123 && CG_Ad==-1);
     /* A foreground delay must not grant the frame a new freshness window.
      * A newer frame dropped by the single-slot mailbox cannot refresh it. */
     fake_tick=3000U; u1(8,9,10.0f,f); feed(&huart1,f,13);
@@ -178,10 +188,47 @@ int main(void) {
 
     len=u2(0x09,NULL,0,f); before=ntx2;
     feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+    CHECK(UART2_PC_Bulk_Is_Busy() && ntx2==before);
+    { unsigned n=eep_reads;
+      UART2_PC_Bulk_Service(); CHECK(eep_reads==n+1 && ntx2==before);
+      u1(18888,123,20.0f,g); feed(&huart1,g,13); UART_Process_Received(UART1_ID);
+      CHECK(GJ_Ad==18888 && CG_Ad==123);
+      UART2_PC_Bulk_Service(); CHECK(eep_reads==n+2 && ntx2==before);
+      UART2_PC_Bulk_Service();
+    }
+    CHECK(!UART2_PC_Bulk_Is_Busy());
     CHECK(ntx2==before+4+2*sizeof(EEP_NODE)+3);
     CHECK(tx2[before+1]==0x89 && tx2[before+2]==0 && tx2[before+3]==2*sizeof(EEP_NODE));
     CHECK(tx2[ntx2-2]==0x0D && tx2[ntx2-1]==0x0A);
     CHECK(tx2[ntx2-3]==checksum(tx2+before,ntx2-before-3));
+
+    /* Failure in record 2 must emit one complete error frame, never a
+     * success header + a partial payload + an unrelated error frame. */
+    eep_fail_index=1;
+    before=ntx2; feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+    UART2_PC_Bulk_Service(); UART2_PC_Bulk_Service();
+    CHECK(ntx2==before);
+    UART2_PC_Bulk_Service();
+    CHECK(ntx2==before+7 && tx2[before+1]==0xC9 && !UART2_PC_Bulk_Is_Busy());
+    eep_fail_index=-1;
+
+    /* Full buffer length and chunks, including one timeout mid-response. */
+    eep[NODE_INPUT_NUM_ADDR_START+1]=MAX_INDEX_ADDR;
+    before=ntx2; feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+    { unsigned i;
+      for (i=0;i<MAX_INDEX_ADDR;i++) UART2_PC_Bulk_Service();
+      CHECK(UART2_PC_Bulk_Is_Busy() && ntx2==before);
+      UART2_PC_Bulk_Service(); CHECK(ntx2==before+UART_TX_BUFFER_SIZE);
+      fail_uart2=1; i=uart2_tx_calls; UART2_PC_Bulk_Service();
+      CHECK(!UART2_PC_Bulk_Is_Busy() && uart2_tx_calls==(int)i+1);
+      fail_uart2=0; UART2_PC_Bulk_Service();
+      CHECK(ntx2==before+UART_TX_BUFFER_SIZE);
+      before=ntx2; feed(&huart2,f,len); UART_Process_Received(UART2_ID);
+      for (i=0;i<MAX_INDEX_ADDR+20U && UART2_PC_Bulk_Is_Busy();i++) UART2_PC_Bulk_Service();
+      CHECK(!UART2_PC_Bulk_Is_Busy() && ntx2==before+7U+MAX_INDEX_ADDR*sizeof(EEP_NODE));
+      CHECK(tx2[ntx2-3] == checksum(tx2+before,ntx2-before-3));
+    }
+    eep[NODE_INPUT_NUM_ADDR_START+1]=2;
 
     /* [B2] Maximal (256-byte) UART2 frame with binary CR/LF/5A payload:
      * framing is length-driven and must never split at an embedded delimiter. */

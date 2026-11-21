@@ -153,11 +153,11 @@ int main(void)
   {
       /* [B2] Process complete UART packets in foreground. Never parse or TX in ISR. */
       UART_Process_Received(UART1_ID);
-      UART_Process_Received(UART2_ID);
+      if (!UART2_PC_Bulk_Is_Busy()) UART_Process_Received(UART2_ID);
       Agreement_Ack_For_Fun();//轨距尺上位机协议处理
       
       
-      if(U2_PC_Work_Mode == 1)
+      if(U2_PC_Work_Mode == 1 && !UART2_PC_Bulk_Is_Busy())
       {
           U2_Cycle_Send_Mode_Time_Current = HAL_GetTick();
           if((U2_Cycle_Send_Mode_Time_Current-U2_Cycle_Send_Mode_Time_History) >= 1000)
@@ -195,6 +195,7 @@ int main(void)
         Page_init();
       /*蜂鸣器响应*/
       Beep_Reflash();
+      UART2_PC_Bulk_Service();
   }
     /* USER CODE END WHILE */
 

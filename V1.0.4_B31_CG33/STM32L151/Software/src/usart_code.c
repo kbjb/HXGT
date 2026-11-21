@@ -59,17 +59,24 @@ void UART_Start_Receive(UART_ID_t uart_id)
     UART_B2_Arm(manager);
 }
 
-void UART_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
+uint8_t UART_Try_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
 {
     UART_Manager_t *manager;
     if (uart_id >= UART_MAX || data == NULL || length == 0 ||
-        length > UART_TX_BUFFER_SIZE) return;
+        length > UART_TX_BUFFER_SIZE) return 0U;
     manager = &uart_managers[uart_id];
-    if (manager->huart == NULL) return;
-    /* [B2] Only called from foreground. Bound a failed TX instead of
-     * indefinitely blocking the main loop with HAL_MAX_DELAY. */
+    if (manager->huart == NULL) return 0U;
     if (HAL_UART_Transmit(manager->huart, data, length, 100U) != HAL_OK)
+    {
         manager->error_count++;
+        return 0U;
+    }
+    return 1U;
+}
+
+void UART_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
+{
+    (void)UART_Try_Send_Data(uart_id, data, length);
 }
 
 uint8_t UART_Is_Frame_Ready(UART_ID_t uart_id)

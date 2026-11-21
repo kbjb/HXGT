@@ -7,7 +7,7 @@ import tempfile
 
 p = Path(__file__).resolve().parents[1] / "STM32L151/Core/Src/main.c"
 c = p.read_text(encoding="gb18030")
-part = c[c.index("      if(U2_PC_Work_Mode == 1)"):c.index("      Storage_Key_Check_Scn();")]
+part = c[c.index("      if(U2_PC_Work_Mode == 1 && !UART2_PC_Bulk_Is_Busy())"):c.index("      Storage_Key_Check_Scn();")]
 stub = r'''
 #include <stdint.h>
 #include <stdio.h>
@@ -20,6 +20,8 @@ stub = r'''
 static uint32_t tick;
 static uint32_t U2_Cycle_Send_Mode_Time_Current,U2_Cycle_Send_Mode_Time_History;
 static unsigned U2_PC_Work_Mode=1,page,fresh=1,eep=1,gj_valid=1,cg_ok=1,calls;
+static unsigned bulk_busy;
+static unsigned UART2_PC_Bulk_Is_Busy(void){return bulk_busy;}
 static unsigned GJ_Ad,CG_Ad,CG_Result_Status;
 static float Temp=20.0f;
 static char sent[96];
@@ -42,7 +44,8 @@ int main(void){
     tick+=1000; eep=1; gj_valid=0; run(); assert(calls==0);
     tick+=1000; gj_valid=1; cg_ok=0; run(); assert(calls==0);
     tick+=1000; cg_ok=1; page=1; run(); assert(calls==0);
-    tick+=1000; page=page_main; run(); assert(calls==1);
+    tick+=1000; page=page_main; bulk_busy=1; run(); assert(calls==0);
+    bulk_busy=0; run(); assert(calls==1);
     assert(strcmp(sent,"Type:0|Data1:1435.00|Data2:-22.50|Temp:20.00\r\n")==0);
     run(); assert(calls==1);
     puts("CG34 telemetry: PASS; stale, invalid calibration and unavailable CH blocked; valid wire record unchanged");

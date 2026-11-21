@@ -57,6 +57,7 @@ uint32_t UART_Get_Error_Count(UART_ID_t uart_id);
 void     UART_Manager_Init(UART_ID_t usart_id);
 void     UART_Start_Receive(UART_ID_t uart_id);
 void     UART_Send_Data(UART_ID_t uart_id, uint8_t* data, uint16_t length);
+uint8_t  UART_Try_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length);
 uint8_t  UART_Is_Frame_Ready(UART_ID_t uart_id);
 uint32_t UART_Get_Frame_Rx_Tick(UART_ID_t uart_id);
 uint16_t UART_Get_Frame_Length(UART_ID_t uart_id);
