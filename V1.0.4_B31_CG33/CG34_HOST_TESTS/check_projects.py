@@ -12,10 +12,10 @@ PROJECTS = (
     ("STM32L151/MDK-ARM/STM32L151.uvprojx", (
         "Core/Src/main.c", "Software/src/Algorithm_code.c", "Software/src/App_code.c",
         "Software/src/App_key.c", "Software/src/agreement_code.c",
-        "Software/src/oled_code.c", "Software/src/usart_code.c")),
+        "Software/src/oled_code.c", "Software/src/usart_code.c", "Software/src/App_Eep.c")),
     ("QINGJIAOBAN/PROJECT/GuiJuChi.uvprojx", (
         "USER/main.c", "USER/stm32f10x_it.c", "CLASS/SCR/lm9507_code.c",
-        "CLASS/SCR/usart_code.c")),
+        "CLASS/SCR/usart_code.c", "CLASS/SCR/ads1110_code.c", "CLASS/SCR/iic_code.c", "CLASS/SCR/adc161_code.c")),
 )
 with tempfile.TemporaryDirectory(prefix="cg34_keil_inc_") as temp:
     alias = Path(temp)
