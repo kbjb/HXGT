@@ -230,8 +230,25 @@ static uint8_t B3_SequenceNewer(uint32_t a, uint32_t b)
     return (delta != 0U && delta < 0x80000000UL) ? 1U : 0U;
 }
 
-/* return: 0=both blank, 1=valid slot, 2=corrupt/no valid,
- * 3=read failure. active: 0=A / 1=B / -1=none. */
+/* A failed FIRST append/clear starts with A's invalid marker, then a
+ * sequential page write of the sequence-1 metadata. Require an exact
+ * prefix of one of those two images, followed only by erased bytes. */
+static uint8_t B3_IsPartialFirstRecordMeta(const uint8_t *a, const uint8_t *b)
+{
+    uint8_t expected[EEP_B3_SLOT_LEN];
+    uint8_t n = B3_MARKER_OFFSET, count;
+    if (a[B3_MARKER_OFFSET] != 0U || !B3_IsBlank(b)) return 0U;
+    while (n > 0U && a[n - 1U] == 0xFFU) --n;
+    for (count = 0U; count <= 1U; ++count)
+    {
+        B3_MakeRecordMeta(expected, count, 1U);
+        if (memcmp(a, expected, n) == 0) return 1U;
+    }
+    return 0U;
+}
+
+/* return: 0=both blank, 1=valid slot, 2=corrupt/no valid, 3=read failure,
+ * 4=candidate partial first record commit. active: 0=A/B=1/-1=none. */
 static uint8_t B3_FindSlot(uint16_t slot_a, uint16_t slot_b,
                            uint8_t is_cal, uint8_t chosen[EEP_B3_SLOT_LEN],
                            int8_t *active, uint32_t *sequence)
@@ -247,7 +264,9 @@ static uint8_t B3_FindSlot(uint16_t slot_a, uint16_t slot_b,
     {
         *active = -1;
         *sequence = 0U;
-        return (B3_IsBlank(a) && B3_IsBlank(b)) ? 0U : 2U;
+        if (B3_IsBlank(a) && B3_IsBlank(b)) return 0U;
+        if (!is_cal && B3_IsPartialFirstRecordMeta(a, b)) return 4U;
+        return 2U;
     }
     *active = valid_b && (!valid_a ||
               B3_SequenceNewer(Get32(b+6), Get32(a+6))) ? 1 : 0;
@@ -256,12 +275,18 @@ static uint8_t B3_FindSlot(uint16_t slot_a, uint16_t slot_b,
     return 1U;
 }
 
-/* [B3] Atomic-ish A/B journal commit:
- * (1) invalidate TARGET marker; (2) write new CRC-covered payload;
- * (3) read back and compare; (4) write the 0xA5 commit marker LAST;
- * (5) read back and validate. The old valid page is untouched.
- */
-static uint8_t B3_Commit(uint16_t slot_a, uint16_t slot_b, uint8_t is_cal,
+typedef enum
+{
+    B3_COMMIT_FAILED = 0,    /* target could not have become the valid copy */
+    B3_COMMIT_VERIFIED = 1,
+    B3_COMMIT_UNCERTAIN = 2 /* marker may already be durable; re-scan before writing */
+} B3_COMMIT_RESULT;
+
+/* (1) invalidate TARGET marker and verify it is no longer committed;
+ * (2) write and compare new CRC-covered payload;
+ * (3) write the commit marker LAST, read back and validate.
+ * The old valid page is untouched. */
+static B3_COMMIT_RESULT B3_Commit(uint16_t slot_a, uint16_t slot_b, uint8_t is_cal,
                          const uint8_t data[EEP_B3_SLOT_LEN],
                          int8_t *active, uint32_t *sequence)
 {
@@ -271,22 +296,24 @@ static uint8_t B3_Commit(uint16_t slot_a, uint16_t slot_b, uint8_t is_cal,
     uint8_t marker = B3_COMMIT;
 
     if (AT24C512_WriteByte((uint16_t)(target+B3_MARKER_OFFSET), invalid)
-        != EEPROM_OK) return 0U;
+        != EEPROM_OK) return B3_COMMIT_FAILED;
+    if (AT24C512_ReadByte((uint16_t)(target+B3_MARKER_OFFSET), verify)
+        != EEPROM_OK || verify[0] != invalid) return B3_COMMIT_FAILED;
     if (AT24C512_WriteBuffer(target, (uint8_t *)data, B3_MARKER_OFFSET)
-        != EEPROM_OK) return 0U;
+        != EEPROM_OK) return B3_COMMIT_FAILED;
     if (AT24C512_ReadBuffer(target, verify, B3_MARKER_OFFSET)
-        != EEPROM_OK) return 0U;
-    if (memcmp(data, verify, B3_MARKER_OFFSET) != 0) return 0U;
+        != EEPROM_OK || memcmp(data, verify, B3_MARKER_OFFSET) != 0)
+        return B3_COMMIT_FAILED;
     if (AT24C512_WriteByte((uint16_t)(target+B3_MARKER_OFFSET), marker)
-        != EEPROM_OK) return 0U;
+        != EEPROM_OK) return B3_COMMIT_UNCERTAIN;
     if (AT24C512_ReadBuffer(target, verify, EEP_B3_SLOT_LEN)
-        != EEPROM_OK) return 0U;
+        != EEPROM_OK) return B3_COMMIT_UNCERTAIN;
     if (memcmp(data, verify, EEP_B3_SLOT_LEN) != 0 ||
-        !B3_SlotValid(verify, is_cal)) return 0U;
+        !B3_SlotValid(verify, is_cal)) return B3_COMMIT_UNCERTAIN;
 
     *active = (*active == 0) ? 1 : 0;
     *sequence = Get32(data+6);
-    return 1U;
+    return B3_COMMIT_VERIFIED;
 }
 
 static void B3_CalibrationToGlobals(const B3_CAL_DATA *c)
@@ -308,12 +335,15 @@ static void B3_CalibrationFromGlobals(B3_CAL_DATA *c)
 static uint8_t B3_SaveCalibration(const B3_CAL_DATA *new_data)
 {
     uint8_t buf[EEP_B3_SLOT_LEN];
+    B3_COMMIT_RESULT result;
     if (!ValidCal(new_data)) return 0U;
     /* A nonblank chip without valid B3 calibration is quarantined. */
     if (cal_state != EEP_STATE_B3_VALID) return 0U;
     B3_MakeCal(buf, new_data, cal_sequence + 1U);
-    if (!B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
-                   buf, &cal_active_slot, &cal_sequence)) return 0U;
+    result = B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B, 1U,
+                       buf, &cal_active_slot, &cal_sequence);
+    if (result == B3_COMMIT_UNCERTAIN) cal_state = EEP_STATE_IO_ERROR;
+    if (result != B3_COMMIT_VERIFIED) return 0U;
     B3_CalibrationToGlobals(new_data);
     cal_state = EEP_STATE_B3_VALID;
     return 1U;
@@ -385,11 +415,33 @@ static uint8_t B31_InitializeFactoryCalibration(void)
     for (copy = 0U; copy < 2U; ++copy)
     {
         B3_MakeCal(snapshot, &defaults, cal_sequence + 1U);
-        if (!B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B,
-                       1U, snapshot, &cal_active_slot, &cal_sequence))
+        if (B3_Commit(EEP_B3_CAL_SLOT_A, EEP_B3_CAL_SLOT_B,
+                      1U, snapshot, &cal_active_slot, &cal_sequence)
+            != B3_COMMIT_VERIFIED)
             return 0U;
     }
     cal_state = EEP_STATE_B3_VALID;
+    return 1U;
+}
+
+/* A first append can only have written record 0. Any non-erased byte
+ * after it is inconsistent with a first transaction: quarantine rather
+ * than interpreting a potentially damaged journal as empty.
+ * 1=all erased, 0=nonblank, 2=I/O error. */
+static uint8_t B3_CheckErasedAfterFirstRecord(void)
+{
+    uint8_t raw[EEP_B3_SLOT_LEN];
+    uint32_t addr = EEP_B3_RECORD_START + EEP_NODE_ENCODED_LEN;
+    const uint32_t end = EEP_B3_RECORD_START + MAX_INDEX_ADDR * EEP_NODE_ENCODED_LEN;
+    while (addr < end)
+    {
+        uint16_t n = (uint16_t)((end - addr < sizeof(raw)) ? end - addr : sizeof(raw));
+        uint16_t i;
+        if (AT24C512_ReadBuffer((uint16_t)addr, raw, n) != EEPROM_OK) return 2U;
+        for (i = 0U; i < n; ++i)
+            if (raw[i] != 0xFFU) return 0U;
+        addr += n;
+    }
     return 1U;
 }
 
@@ -457,8 +509,16 @@ uint8_t Eep_Data_Get(void)
         record_count = Get16(rec_slot + 10);
         record_state = EEP_RECORD_B3_VALID;
     }
-    else if (result == 2U) record_state = EEP_RECORD_CORRUPT;
-    else record_state = EEP_RECORD_EMPTY;
+    else if (result == 4U && cal_state == EEP_STATE_B3_VALID)
+    {
+        /* Marker was never committed. Treat this as the prior empty
+         * state, without exposing record 0 or repairing on boot. */
+        uint8_t erased = B3_CheckErasedAfterFirstRecord();
+        if (erased == 2U) return 0U; /* IO_ERROR until a successful re-scan */
+        record_state = erased ? EEP_RECORD_EMPTY : EEP_RECORD_CORRUPT;
+    }
+    else if (result == 0U) record_state = EEP_RECORD_EMPTY;
+    else record_state = EEP_RECORD_CORRUPT;
 
     return (cal_state == EEP_STATE_B3_VALID &&
             record_state != EEP_RECORD_CORRUPT) ? 1U : 0U;
@@ -533,13 +593,18 @@ uint8_t Eep_Write_For_Unsigned32(uint16_t addr, uint32_t data)
 static uint8_t B3_SaveRecordCount(uint16_t count)
 {
     uint8_t buf[EEP_B3_SLOT_LEN];
+    B3_COMMIT_RESULT result;
     if (cal_state != EEP_STATE_B3_VALID ||
         count > MAX_INDEX_ADDR || record_state == EEP_RECORD_CORRUPT ||
         record_state == EEP_RECORD_IO_ERROR ||
         record_state == EEP_RECORD_NOT_READY) return 0U;
     B3_MakeRecordMeta(buf, count, record_sequence + 1U);
-    if (!B3_Commit(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
-                   buf, &record_active_slot, &record_sequence)) return 0U;
+    result = B3_Commit(EEP_B3_NODE_SLOT_A, EEP_B3_NODE_SLOT_B, 0U,
+                       buf, &record_active_slot, &record_sequence);
+    /* In particular, do not let a retry overwrite record N if the
+     * previous commit may already have made N visible on disk. */
+    if (result == B3_COMMIT_UNCERTAIN) record_state = EEP_RECORD_IO_ERROR;
+    if (result != B3_COMMIT_VERIFIED) return 0U;
     record_count=count;
     record_state=EEP_RECORD_B3_VALID;
     return 1U;

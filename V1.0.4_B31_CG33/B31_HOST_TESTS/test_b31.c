@@ -12,6 +12,8 @@ CH_Calibration_Param_Str CH_Param = {10000,13000,20.0f};
 static uint8_t mem[65536];
 static unsigned writes, reads, polls, assertions, page_crosses, writes_to_old;
 static int fail_after_writes=-1, fail_after_reads=-1;
+static int partial_record_meta=-1;
+static uint8_t skip_program_once, fail_after_record_marker;
 static uint8_t wp, bus_off, ack_timeout, enforce_layout;
 #define CHECK(x) do { assert(x); assertions++; } while(0)
 
@@ -29,7 +31,8 @@ static void reset_all(void)
 {
     memset(mem,0xFF,sizeof(mem)); reset_globals();
     writes=reads=polls=page_crosses=writes_to_old=0;
-    fail_after_writes=fail_after_reads=-1; wp=bus_off=ack_timeout=0;
+    fail_after_writes=fail_after_reads=partial_record_meta=-1;
+    skip_program_once=fail_after_record_marker=wp=bus_off=ack_timeout=0;
     enforce_layout=1;
 }
 HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *h, uint16_t d,
@@ -60,6 +63,22 @@ HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *h,uint16_t d,
     if (fail_after_writes>=0 && writes>=(unsigned)fail_after_writes)
         return HAL_ERROR;
     writes++;
+    if (skip_program_once)
+    {
+        skip_program_once=0;
+        return HAL_OK;
+    }
+    if (partial_record_meta>=0 && a==EEP_B3_NODE_SLOT_A && n==63U)
+    {
+        assert((unsigned)partial_record_meta<=n);
+        memcpy(mem+a,src,(unsigned)partial_record_meta);
+        return HAL_ERROR;
+    }
+    if (fail_after_record_marker && a==EEP_B3_NODE_SLOT_A+63U && n==1U && src[0]==0xA5U)
+    {
+        mem[a]=src[0]; /* physically durable before I2C returned timeout */
+        return HAL_TIMEOUT;
+    }
     if (!wp)
     {
         memcpy(mem+a,src,n);
@@ -327,6 +346,107 @@ static void test_record_boundaries_and_meta_rollback(void)
     CHECK(Eep_Clear_Node()==0);
 }
 
+static void test_first_record_recovery(void)
+{
+    EEP_NODE read;
+    uint16_t count;
+    unsigned before;
+    /* Cut every byte boundary of the first record-count page write. */
+    for (int prefix=0;prefix<=63;prefix++)
+    {
+        reset_all(); CHECK(Eep_Data_Get()==1);
+        partial_record_meta=prefix;
+        CHECK(Eep_Input_Node(0U,node(0))==3);
+        CHECK(mem[EEP_B3_NODE_SLOT_A+63U]==0U);
+        partial_record_meta=-1;
+        before=writes;
+        CHECK(Eep_Data_Get()==1 && writes==before);
+        CHECK(Eep_Get_Record_State()==EEP_RECORD_EMPTY);
+        CHECK(Eep_Get_Node_Count(&count)==1 && count==0U);
+        CHECK(Eep_Output_Node(0U,&read)==1);
+        CHECK(Eep_Input_Node(0U,node(9))==0);
+        CHECK(Eep_Data_Get()==1);
+        CHECK(Eep_Get_Node_Count(&count)==1 && count==1U);
+        CHECK(Eep_Output_Node(0U,&read)==0 && read.data1==node(9).data1);
+    }
+
+    /* An interrupted first explicit clear is also a sequence-1 image. */
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    partial_record_meta=63;
+    CHECK(Eep_Clear_Node()==0);
+    partial_record_meta=-1;
+    before=writes;
+    CHECK(Eep_Data_Get()==1 && writes==before);
+    CHECK(Eep_Get_Node_Count(&count)==1 && count==0U);
+
+    /* More evidence is required than simply seeing a provisional marker. */
+    fail_after_reads=(int)reads+4;
+    CHECK(Eep_Data_Get()==0 && Eep_Get_Record_State()==EEP_RECORD_IO_ERROR);
+    fail_after_reads=-1;
+    mem[EEP_B3_RECORD_START+2U*EEP_NODE_ENCODED_LEN]=0;
+    CHECK(Eep_Data_Get()==0 && Eep_Get_Record_State()==EEP_RECORD_CORRUPT);
+    mem[EEP_B3_RECORD_START+2U*EEP_NODE_ENCODED_LEN]=0xFFU;
+    mem[EEP_B3_NODE_SLOT_A+4U]=0xFFU; /* hole, not a torn prefix */
+    CHECK(Eep_Data_Get()==0 && Eep_Get_Record_State()==EEP_RECORD_CORRUPT);
+    CHECK(writes==before);
+
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    partial_record_meta=0; CHECK(Eep_Input_Node(0U,node(0))==3);
+    mem[EEP_B3_NODE_SLOT_B+63U]=0;
+    CHECK(Eep_Data_Get()==0 && Eep_Get_Record_State()==EEP_RECORD_CORRUPT);
+}
+
+static void test_uncertain_commit_requires_readback(void)
+{
+    EEP_NODE read;
+    uint16_t count;
+    unsigned before;
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    /* Failure while reading verified data AFTER the commit marker landed. */
+    fail_after_reads=(int)reads+3;
+    CHECK(Eep_Input_Node(0U,node(7))==3);
+    CHECK(mem[EEP_B3_NODE_SLOT_A+63U]==0xA5U);
+    fail_after_reads=-1;
+    CHECK(Eep_Get_Record_State()==EEP_RECORD_IO_ERROR);
+    CHECK(Eep_Get_Node_Count(&count)==0);
+    before=writes;
+    CHECK(Eep_Input_Node(0U,node(8))==3 && writes==before);
+    CHECK(Eep_Clear_Node()==0 && writes==before);
+    CHECK(Eep_Data_Get()==1 && writes==before);
+    CHECK(Eep_Get_Node_Count(&count)==1 && count==1U);
+    CHECK(Eep_Output_Node(0U,&read)==0 && read.data1==node(7).data1);
+
+    /* Failure in the marker write's completion report, after programming. */
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    fail_after_record_marker=1;
+    CHECK(Eep_Input_Node(0U,node(7))==3);
+    CHECK(Eep_Get_Record_State()==EEP_RECORD_IO_ERROR);
+    CHECK(mem[EEP_B3_NODE_SLOT_A+63U]==0xA5U);
+    before=writes;
+    CHECK(Eep_Input_Node(0U,node(8))==3 && writes==before);
+    CHECK(Eep_Data_Get()==1);
+    CHECK(Eep_Output_Node(0U,&read)==0 && read.data1==node(7).data1);
+
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    /* An ACK alone must not authorize overwriting a still-valid slot. */
+    skip_program_once=1;
+    before=writes;
+    CHECK(Eep_Save_Password(123456UL)==0 && writes==before+1U);
+    CHECK(mem[EEP_B3_CAL_SLOT_A+63U]==0xA5U);
+    CHECK(Eep_Get_Storage_State()==EEP_STATE_B3_VALID);
+    CHECK(Driver_Calibration_Password==997900UL);
+
+    fail_after_reads=(int)reads+2;
+    CHECK(Eep_Save_Password(123456UL)==0);
+    fail_after_reads=-1;
+    CHECK(Eep_Get_Storage_State()==EEP_STATE_IO_ERROR);
+    CHECK(Driver_Calibration_Password==997900UL);
+    before=writes;
+    CHECK(Eep_Save_Password(234567UL)==0 && writes==before);
+    CHECK(Eep_Data_Get()==1 && writes==before);
+    CHECK(Driver_Calibration_Password==123456UL);
+}
+
 int main(void)
 {
     test_driver();
@@ -336,6 +456,8 @@ int main(void)
     test_calibration_records_separation();
     test_cal_rollback_and_wp();
     test_record_boundaries_and_meta_rollback();
+    test_first_record_recovery();
+    test_uncertain_commit_requires_readback();
     printf("B3.1 EEPROM production tests: PASS %u assertions; "
            "64KiB blank scan, init recovery, A/B persistence, "
            "100 records, nonblank lock, I2C/WP/powerloss, disjoint layout.\n",
