@@ -1,14 +1,18 @@
 #include "lm9507_head.h"
+#include "lm95071_sample.h"
 
 void LM9507_DELAY(uint32_t time)
 {
-    while(time--);
+    volatile uint32_t remaining = time;
+    while (remaining != 0U) --remaining;
 }
 
 void LM9507_INIT(LM9507_STR *lm9507_str)
 {
     lm9507_str->clk->str_init(lm9507_str->clk);
+    lm9507_str->clk->write(lm9507_str->clk,Bit_RESET);
     lm9507_str->cs->str_init(lm9507_str->cs);
+    lm9507_str->cs->write(lm9507_str->cs,Bit_SET); /* deselect during startup conversion */
     lm9507_str->mosi->str_init(lm9507_str->mosi);
     lm9507_str->miso->str_init(lm9507_str->miso);
 }
@@ -31,6 +35,7 @@ uint16_t LM9507_READ(LM9507_STR *lm9507_str)
     for(uint8_t i=0;i<16;i++)
     {
         lm9507_str->clk->write(lm9507_str->clk,Bit_SET);
+        LM9507_DELAY(10U);
         data<<=1;
         if(lm9507_str->miso->read(lm9507_str->miso) == Bit_SET)
             data+=1;
@@ -44,18 +49,11 @@ uint16_t LM9507_READ(LM9507_STR *lm9507_str)
 float LM95071_READTEMP(LM9507_STR *lm9507_str)
 {
     uint16_t raw;
-    int16_t temp;
     lm9507_str->cs->write(lm9507_str->cs,Bit_RESET);
+    LM9507_DELAY(10U);
     raw = lm9507_str->read(lm9507_str);            // 读取温度数据
     lm9507_str->cs->write(lm9507_str->cs,Bit_SET);
-    
-    
-    // 数据处理（14位有符号数）
-    raw >>= 2; // 去除低2位固定值
-    temp = (int16_t)(raw << 2); // 符号扩展
-    temp >>= 2; // 恢复实际值
-    
-    return temp * 0.03125f;
+    return LM95071_Decode(raw);
 }
 
 // 进入关断模式

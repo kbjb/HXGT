@@ -74,6 +74,29 @@ void USART_INIT(USATR_STR *usart_str)
     USART_Cmd(usart_str->usart, ENABLE);                                                          //Ê¹ÄÜ´®¿Ú
 }
 
+/* Only the 115200-baud foreground sensor-report path uses this budget.
+ * A complete 13-byte 8N1 frame occupies about 1.13 ms. Use one deadline
+ * for TXE + TC across the entire frame, not 10 ms per character.
+ * A poll-count backstop also releases the foreground if SysTick stops. */
+uint8_t USART_TrySendReport(USATR_STR *p, const uint8_t *data, uint8_t len)
+{
+    uint32_t start = sensor_tick_ms;
+    uint32_t polls = 100000UL;
+    uint16_t i;
+    for (i = 0U; i <= len; ++i)
+    {
+        uint16_t flag = (i < len) ? USART_FLAG_TXE : USART_FLAG_TC;
+        do
+        {
+            if ((uint32_t)(sensor_tick_ms - start) >= 10U || polls == 0U)
+                return 0U; /* Drop remainder; next period sends a new frame. */
+            --polls;
+        } while (USART_GetFlagStatus(p->usart, flag) == RESET);
+        if (i < len) USART_SendData(p->usart, data[i]);
+    }
+    return 1U;
+}
+
 void USART_SEND_BYTE(USATR_STR *usart_str,uint8_t byte)
 {
     while(USART_GetFlagStatus(usart_str->usart,USART_FLAG_TXE) == RESET);

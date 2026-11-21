@@ -13,7 +13,7 @@
 #include "data_head.h"
 
 #define VERSION "1.0.2" /* [B2] UART protocol reliability update. */
-#define SENSOR_SEND_PERIOD_MS 500U /* [B2] 2Hz sensor reports, independent of ACK. */
+#define SENSOR_SEND_PERIOD_MS 100U /* 10 Hz reports, independent of ACK. Not the ADC sample period. */
 
 
 

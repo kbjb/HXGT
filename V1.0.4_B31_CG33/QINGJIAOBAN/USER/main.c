@@ -4,7 +4,9 @@
 #include "ads1110_head.h"
 #include "adc161_head.h"
 #include "cg_angle_filter.h" /* [CG32-01] */
+#include "cg_timing_watch.h"
 #include "lm9507_head.h"
+#include "lm95071_sample.h"
 
 
 
@@ -139,9 +141,13 @@ volatile uint32_t uart1_ack_bad_count                 = 0; /* [B2] malformed ACK
 uint8_t     ads1110_cnt                             = 0;
 uint16_t    ads1110_buffer[ADS1110_BUFFER_SIZE];
 uint16_t    ads1110_aver;
-float       temper                                  = 0;
+float       temper = NAN; /* No valid conversion at boot; preserve wire format. */
+static uint32_t temperature_last_ms = 0U;
 
 int16_t adc161_aver; /* UART1 inclination payload */
+volatile CG_TIMING_WATCH CG_Sample_Timing; /* actual interval between filter pushes */
+volatile uint32_t CG_Report_Timeouts; /* TXE/TC did not complete in budget */
+volatile CG_TIMING_WATCH CG_Report_Timing; /* report attempts, not on-wire receipt */
 CG_ANGLE_FILTER CG_Angle_Filter; /* Keil Watch: raw/filtered/output */
 
 
@@ -222,6 +228,7 @@ int main(void)
          * retain an old sum, and its state machine caused unwanted latching.
          * Keep AngleParam fields for existing Keil Watch procedures. */
         adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
+        CG_RecordGap(&CG_Sample_Timing, sensor_tick_ms);
         AngleParam.realValue = CG_Angle_Filter.filtered_value;
         AngleParam.StableValue = CG_Angle_Filter.output_value;
         AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
@@ -234,7 +241,13 @@ int main(void)
             温度传感器
         */
         //获取LM6509温度数据
-        temper = lm9531_str.readTemp(&lm9531_str);
+        if (LM95071_ReadDue(sensor_tick_ms, temperature_last_ms))
+        {
+            temper = lm9531_str.readTemp(&lm9531_str);
+            /* Measure the next interval from transaction completion, even
+             * when a foreground iteration is delayed. No catch-up bursts. */
+            temperature_last_ms = sensor_tick_ms;
+        }
         
         if(usart1_str.rx_ok == 1) /* [B1] Only a 7-byte mainboard ACK is expected. */
         {
@@ -256,6 +269,7 @@ int main(void)
         if(send_en == 1)
         {
             send_en  = 0; /* [B2] SysTick is the sole TX scheduler. */
+            CG_RecordGap(&CG_Report_Timing, sensor_tick_ms);
             FToI fToI;
             UToI uToI;
             uint8_t buffer[13] = {0x5A};
@@ -273,7 +287,8 @@ int main(void)
             buffer[10] = getAdd(buffer,10);
             buffer[11] = 0x0D;
             buffer[12] = 0x0A;
-            usart1_str.send_string(&usart1_str,(char *)buffer,13);
+            if (!USART_TrySendReport(&usart1_str, buffer, sizeof(buffer)))
+                ++CG_Report_Timeouts;
         }
         
 //        IWDG_ReloadCounter();  // 重载计数器
