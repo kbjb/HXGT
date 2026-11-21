@@ -51,13 +51,15 @@ int main(void)
     check(27395, 15946, 7781, 15946);    /* reversed sensor polarity */
     check(30000, 30001, 30002, 30002);   /* old float denominator was zero */
     check(30002, 30001, 30000, 30000);
-    check(65533, 65534, 65535, 65533);
-    check(0, 32768, 65535, 65535);       /* wide uint16 range */
+    check(65533, 65534, 65535, 32767);
+    check(0, 32768, 65535, 32767);       /* wide uint16 range */
     invalid(30000, 30000, 30000);
     invalid(100, 100, 200);
     invalid(100, 200, 100);
     invalid(300, 100, 200);
     check(7781, 15946, 27395, 15946);    /* valid after invalid */
+    assert(Get_GJ_Value(0xFFFFU, 20.0f)==0.0f && !GJ_Result_Is_Valid());
+    assert(Get_GJ_Value(0x8000U, 20.0f)==0.0f && !GJ_Result_Is_Valid());
     for (i = 0; i < 10000; ++i) {
         uint16_t a, b, c, sample;
         seed = seed * 1664525U + 1013904223U;
@@ -67,7 +69,7 @@ int main(void)
         seed = seed * 1664525U + 1013904223U;
         c = b + 1 + (uint16_t)(seed >> 18);
         seed = seed * 1664525U + 1013904223U;
-        sample = (uint16_t)(seed >> 16);
+        sample = (uint16_t)(seed >> 17);
         if ((i & 1U) == 0U) check(a, b, c, sample);
         else check(c, b, a, sample);
     }

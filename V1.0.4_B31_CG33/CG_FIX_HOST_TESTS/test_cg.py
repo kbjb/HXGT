@@ -33,7 +33,13 @@ cg_section = display[display.index('void CG_Calibration_Page_Reflash(void)'):dis
 case8 = cg_section.split('        case 8:', 1)[1].split('        case 9:', 1)[0]
 case9 = cg_section.split('        case 9:', 1)[1].split('        case 10:', 1)[0]
 assert '"成功"' not in case8 and '"成功"' in case9
-assert 'CG_Cal_Save_Failed' in case8 and '"EEP ERROR"' in case8 and '"CAL ERROR"' in case8
+assert 'CG_Cal_Save_Failed' in case8 and '"EEP ERROR"' in case8 and 'Calibration_Error_Label' in case8
+for name, save in [('CJ', 6), ('CH', 4)]:
+    section = display[display.index(f'void {name}_Calibration_Page_Reflash(void)'):]
+    ready = section.split(f'        case {save}:', 1)[1].split(f'        case {save+1}:', 1)[0]
+    complete = section.split(f'        case {save+1}:', 1)[1].split(f'        case {save+2}:', 1)[0]
+    assert '"成功"' not in ready and '"成功"' in complete
+    assert 'Calibration_Error_Label' in ready and '"存储键保存"' in ready
 assert 'EEP_B3_SERVICE_ENABLE_LEGACY_CAL_UPGRADE 0' in get('STM32L151/Software/inc/App_Eep.h')
 assert 'EEP_B3_SERVICE_IMPORT_LEGACY_COUNT       0' in get('STM32L151/Software/inc/App_Eep.h')
 
@@ -122,11 +128,26 @@ int main(void) {
   assert(CG_Result_Status == CG_RESULT_OK);
   assert(Get_CG_Value(100,105)==0.0f);
   assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
-  puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference");
+  /* Crossed but allowed zero readings used to jump by ~7 mm at the zero band.
+   * Keep both 180 mm anchors and be continuous on both band edges. */
+  CG_Param = (CG_Calibration_Param_Str){500,-12000,0,12000,20.0f};
+  CG_Data_Init();
+  assert(CG_Result_Status == CG_RESULT_OK);
+  assert(fabsf(Get_CG_Value(-12000,20.0f)-180.0f) < 0.051f);
+  assert(fabsf(Get_CG_Value( 12000,20.0f)+180.0f) < 0.051f);
+  assert(fabsf(Get_CG_Value(-1,20.0f)) < 0.051f);
+  assert(fabsf(Get_CG_Value(501,20.0f)) < 0.051f);
+  assert(fabsf(Get_CG_Value(250,20.0f)) < 0.051f);
+  puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference, crossed-zero continuity");
   return 0;
 }
 ''')
-    func = extract_c_function(key, 'void CG_Calibration_Storage(void)')
+    func = '\n'.join(extract_c_function(key, signature) for signature in (
+        'static uint8_t Calibration_Input_Error(', 'static void Calibration_Fail(',
+        'void CG_Calibration_Storage(void)', 'void GJ_Calibration_Storage(void)',
+        'void CH_Calibration_Storage(void)'))
+    params = get('STM32L151/Software/inc/param_head.h')
+    flags = params[params.index('enum\n{\n    CAL_SAVE_OK'):params.index('extern uint8_t CG_Cal_Save_Failed')]
     (d / 'test_key.c').write_text(r'''
 #include <stdio.h>
 #include <stdint.h>
@@ -134,34 +155,61 @@ int main(void) {
 #include "Algorithm_head.h"
 #include "cg_cal_guard.h"
 CG_Calibration_Param_Str CG_Param, CG_Param_Temp;
+GJ_Calibration_Param_Str GJ_Param, GJ_Param_Temp;
+typedef struct { uint16_t CZ_Ad, HB_Ad; float temp; } CH_Calibration_Param_Str;
+CH_Calibration_Param_Str CH_Param, CH_Param_Temp;
 static uint8_t link_fresh=1;
 uint8_t Sensor_Data_Is_Fresh(void) {return link_fresh;}
 int16_t CG_Ad=0;
+uint16_t GJ_Ad;
 float Temp=20.5f;
 uint8_t CG_Calibration_Status=0, CG_Calibration_Status_History=8, CG_Cal_Save_Failed=0;
-static int save_calls=0, init_calls=0, beeps=0, allow_save=0;
+uint8_t GJ_Calibration_Status, GJ_Calibration_Status_History, GJ_Cal_Save_Failed;
+uint8_t CH_Calibration_Status, CH_Calibration_Status_History, CH_Cal_Save_Failed;
+static int save_calls=0, gj_calls=0, ch_calls=0, init_calls=0, beeps=0, allow_save=0;
 uint8_t Eep_Save_CG_Calibration(CG_Calibration_Param_Str p) {
     ++save_calls; if (!allow_save) return 0;
     CG_Param=p; return 1;
 }
+uint8_t Eep_Save_GJ_Calibration(GJ_Calibration_Param_Str p) {
+    ++gj_calls; if (!allow_save) return 0; GJ_Param=p; return 1;
+}
+uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str p) {
+    ++ch_calls; if (!allow_save) return 0; CH_Param=p; return 1;
+}
 void CG_Data_Init(void) { ++init_calls; }
 void Beep_Ctrl(uint16_t period,uint8_t times) {(void)period; beeps=times;}
-''' + func + r'''
+''' + flags + func + r'''
 int main(void) {
   link_fresh=0; CG_Ad=100; CG_Calibration_Storage();
   assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==3);
   link_fresh=1;
-  CG_Ad=100;   CG_Calibration_Storage(); assert(CG_Calibration_Status==1);
+  Temp=NAN; CG_Calibration_Storage();
+  assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR && CG_Param_Temp.CG_Zero_Left_Ad==0);
+  Temp=20.5f;
+  CG_Ad=100;   CG_Calibration_Storage(); assert(CG_Calibration_Status==1 && CG_Cal_Save_Failed==CAL_SAVE_OK);
   CG_Calibration_Storage(); assert(CG_Calibration_Status==2);
+  Temp=100.01f; CG_Ad=150; CG_Calibration_Storage();
+  assert(CG_Calibration_Status==2 && CG_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR);
+  Temp=20.5f;
   CG_Ad=150;   CG_Calibration_Storage(); assert(CG_Calibration_Status==3);
   CG_Calibration_Storage(); assert(CG_Calibration_Status==4);
+  Temp=-INFINITY; CG_Ad=-9000; CG_Calibration_Storage();
+  assert(CG_Calibration_Status==4 && CG_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR);
+  Temp=20.5f;
   CG_Ad=-9000; CG_Calibration_Storage(); assert(CG_Calibration_Status==5);
   CG_Calibration_Storage(); assert(CG_Calibration_Status==6);
+  Temp=-40.01f; CG_Ad=9000; CG_Calibration_Storage();
+  assert(CG_Calibration_Status==6 && CG_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR);
+  Temp=20.5f;
   CG_Ad=9000;  CG_Calibration_Storage(); assert(CG_Calibration_Status==7);
   CG_Calibration_Storage(); assert(CG_Calibration_Status==8 && save_calls==0);
   link_fresh=0; CG_Calibration_Storage();
   assert(CG_Calibration_Status==8 && CG_Cal_Save_Failed==3 && save_calls==0);
   link_fresh=1;
+  Temp=NAN; CG_Calibration_Storage();
+  assert(CG_Calibration_Status==8 && CG_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR && save_calls==0);
+  Temp=20.5f;
   CG_Calibration_Storage(); assert(CG_Calibration_Status==8 && save_calls==1);
   assert(CG_Cal_Save_Failed==1 && beeps==3 && init_calls==0);
   assert(CG_Calibration_Status_History==0xFFU);
@@ -177,7 +225,52 @@ int main(void) {
   CG_Calibration_Storage();
   assert(CG_Calibration_Status==8 && CG_Cal_Save_Failed==2);
   assert(save_calls==2 && init_calls==1);
-  puts("CG key: PASS; save not premature, failed/implausible saves rejected");
+  allow_save=0; link_fresh=0; GJ_Ad=14000;
+  GJ_Calibration_Storage();
+  assert(GJ_Calibration_Status==0 && GJ_Cal_Save_Failed==CAL_SAVE_NO_SENSOR && !gj_calls);
+  CH_Calibration_Storage();
+  assert(CH_Calibration_Status==0 && CH_Cal_Save_Failed==CAL_SAVE_NO_SENSOR && !ch_calls);
+  link_fresh=1; GJ_Ad=0xFFFFU;
+  GJ_Calibration_Storage();
+  assert(GJ_Calibration_Status==0 && GJ_Cal_Save_Failed==CAL_SAVE_SENSOR_ERROR);
+  CH_Calibration_Storage();
+  assert(CH_Calibration_Status==0 && CH_Cal_Save_Failed==CAL_SAVE_SENSOR_ERROR);
+  Temp=NAN; GJ_Ad=10000;
+  GJ_Calibration_Storage(); GJ_Calibration_Storage();
+  CH_Calibration_Storage(); CH_Calibration_Storage();
+  assert(GJ_Calibration_Status==2 && GJ_Param_Temp.GJ_1410_Ad==10000);
+  assert(CH_Calibration_Status==2 && CH_Param_Temp.CZ_Ad==10000);
+  GJ_Ad=15000;
+  GJ_Calibration_Storage(); GJ_Calibration_Storage();
+  CH_Calibration_Storage(); CH_Calibration_Storage();
+  GJ_Ad=0x8000U;
+  GJ_Calibration_Storage();
+  assert(GJ_Calibration_Status==4 && GJ_Cal_Save_Failed==CAL_SAVE_SENSOR_ERROR);
+  GJ_Ad=23000;
+  GJ_Calibration_Storage(); GJ_Calibration_Storage();
+  GJ_Calibration_Storage(); CH_Calibration_Storage();
+  assert(GJ_Calibration_Status==6 && GJ_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR && !gj_calls);
+  assert(CH_Calibration_Status==4 && CH_Cal_Save_Failed==CAL_SAVE_TEMP_ERROR && !ch_calls);
+  Temp=20.5f; link_fresh=0;
+  GJ_Calibration_Storage(); CH_Calibration_Storage();
+  assert(!gj_calls && !ch_calls && GJ_Cal_Save_Failed==CAL_SAVE_NO_SENSOR && CH_Cal_Save_Failed==CAL_SAVE_NO_SENSOR);
+  link_fresh=1; GJ_Ad=0xFFFFU;
+  GJ_Calibration_Storage(); CH_Calibration_Storage();
+  assert(!gj_calls && !ch_calls && GJ_Cal_Save_Failed==CAL_SAVE_SENSOR_ERROR && CH_Cal_Save_Failed==CAL_SAVE_SENSOR_ERROR);
+  GJ_Ad=24500;
+  GJ_Calibration_Storage(); CH_Calibration_Storage();
+  assert(GJ_Calibration_Status==6 && GJ_Cal_Save_Failed==CAL_SAVE_FAILED && gj_calls==1);
+  assert(CH_Calibration_Status==4 && CH_Cal_Save_Failed==CAL_SAVE_FAILED && ch_calls==1);
+  allow_save=1;
+  GJ_Calibration_Storage(); CH_Calibration_Storage();
+  assert(GJ_Calibration_Status==7 && GJ_Cal_Save_Failed==CAL_SAVE_OK && gj_calls==2);
+  assert(CH_Calibration_Status==5 && CH_Cal_Save_Failed==CAL_SAVE_OK && ch_calls==2);
+  assert(GJ_Param.GJ_1410_Ad==10000 && GJ_Param.GJ_1435_Ad==15000 && GJ_Param.GJ_1470_Ad==23000);
+  assert(CH_Param.CZ_Ad==10000 && CH_Param.HB_Ad==15000 && CH_Param.temp==20.5f);
+  GJ_Calibration_Storage(); GJ_Calibration_Storage();
+  CH_Calibration_Storage(); CH_Calibration_Storage();
+  assert(GJ_Calibration_Status==8 && CH_Calibration_Status==6 && gj_calls==2 && ch_calls==2);
+  puts("Calibration keys: PASS; staged capture, temperature, freshness and ADC guards, verified-commit states");
   return 0;
 }
 ''')

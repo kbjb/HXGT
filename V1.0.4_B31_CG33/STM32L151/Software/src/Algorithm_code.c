@@ -13,9 +13,9 @@ float CG_Zero_Offset = 0;
 //static float B_Center_Offset;
 
 static float K_CG_Left;
-static float B_CG_Left;
+static int16_t CG_Zero_Low;
 static float K_CG_Right;
-static float B_CG_Right;
+static int16_t CG_Zero_High;
 static uint8_t CG_Coefficients_Valid = 0U;
 volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
 
@@ -23,25 +23,32 @@ void CG_Data_Init(void)
 {
     /* [CG32-03] Never divide by a tiny or reversed AD separation. */
     CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
-    K_CG_Left = 0.0f; B_CG_Left = 0.0f;
-    K_CG_Right = 0.0f; B_CG_Right = 0.0f;
+    K_CG_Left = K_CG_Right = 0.0f;
+    CG_Zero_Low = CG_Zero_High = 0;
     if (!CG_Coefficients_Valid)
     {
         CG_Result_Status = CG_RESULT_CAL_ERROR;
         return;
     }
-    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad -
-                           (float)CG_Param.CG_Zero_Left_Ad);
-    B_CG_Left = -K_CG_Left * (float)CG_Param.CG_Zero_Left_Ad;
-    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad -
-                             (float)CG_Param.CG_Zero_Right_Ad);
-    B_CG_Right = -K_CG_Right * (float)CG_Param.CG_Zero_Right_Ad;
+    /* The zero band uses sorted endpoints. Anchor the outer branches
+     * to those very endpoints, even when the recorded zeroes cross, so
+     * there is no discontinuity. Keep +/-180 mm reference points fixed.
+     * Guarded physical span exceeds the maximum zero gap. */
+    CG_Zero_Low = CG_Param.CG_Zero_Left_Ad;
+    CG_Zero_High = CG_Param.CG_Zero_Right_Ad;
+    if (CG_Zero_Low > CG_Zero_High)
+    {
+        int16_t old_low = CG_Zero_Low;
+        CG_Zero_Low = CG_Zero_High;
+        CG_Zero_High = old_low;
+    }
+    K_CG_Left = 180.0f / (float)((int32_t)CG_Param.CG_Max_Left_Ad - CG_Zero_Low);
+    K_CG_Right = -180.0f / (float)((int32_t)CG_Param.CG_Max_Right_Ad - CG_Zero_High);
     CG_Result_Status = CG_RESULT_OK;
 }
 
 float Get_CG_Value(int16_t adc_value, float temp)
 {
-    int16_t zero_low, zero_high;
     /* [CG32-03] Returned 0 on errors is NOT a measurement; callers must
      * inspect CG_Result_Status and show an error, not 0.00 mm. */
     CG_Value_r = 0.0f;
@@ -60,14 +67,10 @@ float Get_CG_Value(int16_t adc_value, float temp)
      * the ACTUAL temperature recorded with the four-point calibration.
      * For factory CG_Param.temp=20, results match the previous formula. */
     TempOffset = -0.054637f * (temp - CG_Param.temp);
-    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
-                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
-                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    if (adc_value < zero_low)
-        CG_Value_t = (float)adc_value * K_CG_Left + B_CG_Left;
-    else if (adc_value > zero_high)
-        CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
+    if (adc_value < CG_Zero_Low)
+        CG_Value_t = (float)((int32_t)adc_value - CG_Zero_Low) * K_CG_Left;
+    else if (adc_value > CG_Zero_High)
+        CG_Value_t = (float)((int32_t)adc_value - CG_Zero_High) * K_CG_Right;
     else
         CG_Value_t = 0.0f;
 
@@ -97,6 +100,7 @@ float Get_GJ_Value(uint16_t GJ_Ad, float temp)
 
     (void)temp; /* There is no experimentally established GJ thermal model. */
     GJ_Result_Valid = 0U;
+    if (GJ_Ad > 0x7FFFU) return 0.0f; /* unavailable ADS1110 gauge data */
     /* As in EEPROM validation, either sensor direction is permitted, but
      * equal or nonmonotonic points cannot calibrate this measurement. */
     if (!((x1 < x2 && x2 < x3) || (x1 > x2 && x2 > x3)))

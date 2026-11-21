@@ -96,6 +96,9 @@ int main(void) {
     assert(!strcmp(gj_label,"CAL ERROR") && !strcmp(cg_label,"+000.00") && beep_calls==0);
     gj_valid=1; Main_Page_Reflash();
     assert(!strcmp(gj_label,"+1435.00") && beep_calls==1 && beeps==3);
+    GJ_Ad=0xFFFFU; Main_Page_Reflash();
+    assert(!strcmp(gj_label,"NO SENSOR") && !strcmp(cg_label,"+000.00") && beep_calls==1);
+    GJ_Ad=15000U;
     fresh=0; Main_Page_Reflash(); assert(!strcmp(gj_label,"NO SENSOR") && beep_calls==1);
     CH_Page_Init(); CH_Page_Reflash();
     assert(!strcmp(gj_label,"NOT READY") && !strcmp(cg_label,"NOT READY") && beep_calls==1);

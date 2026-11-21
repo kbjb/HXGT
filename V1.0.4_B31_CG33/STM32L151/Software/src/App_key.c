@@ -323,123 +323,132 @@ void Change_Time_For_Set_Time(void)
 /*存储键相关功能*/
 
 
+static uint8_t Calibration_Input_Error(uint8_t check_gauge, uint8_t check_temp)
+{
+    if (!Sensor_Data_Is_Fresh()) return CAL_SAVE_NO_SENSOR;
+    /* Sensor board sends unsigned 15-bit gauge ADC data or 0xffff on fault. */
+    if (check_gauge && GJ_Ad > 0x7FFFU) return CAL_SAVE_SENSOR_ERROR;
+    if (check_temp && !(Temp >= -40.0f && Temp <= 100.0f))
+        return CAL_SAVE_TEMP_ERROR; /* Includes a missing (NaN) conversion. */
+    return CAL_SAVE_OK;
+}
+
+static void Calibration_Fail(uint8_t *state, uint8_t *history, uint8_t error)
+{
+    if (*state != error) *history = 0xFFU; /* invalidate previous message */
+    *state = error;
+    Beep_Ctrl(100,3);
+}
+
 void CG_Calibration_Storage(void)
 {
-    /* [CG32-05] Never commit a value from a dead 500 ms sensor link. */
-    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
-         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U ||
-         CG_Calibration_Status == 8U) && !Sensor_Data_Is_Fresh())
+    uint8_t step = CG_Calibration_Status;
+    if (step >= 10U) return;
+    /* The temperature reference applies to the whole four-point calibration.
+     * Reject untrusted temperature at each data capture as well as commit. */
+    if ((step & 1U) == 0U)
     {
-        CG_Cal_Save_Failed = 3U;
-        CG_Calibration_Status_History = 0xFFU;
-        Beep_Ctrl(100,3);
-        return;
+        uint8_t error = Calibration_Input_Error(0U,1U);
+        if (error != CAL_SAVE_OK)
+        {
+            Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History, error);
+            return;
+        }
     }
-    if (CG_Cal_Save_Failed == 3U)
+    switch (step)
     {
-        CG_Cal_Save_Failed = 0U;
-        CG_Calibration_Status_History = 0xFFU;
-    }
-    CG_Calibration_Status++;
-    switch(CG_Calibration_Status)
-    {
-        case 1:
-            CG_Param_Temp.CG_Zero_Left_Ad  = CG_Ad;
-            break;
-        case 3:
-            CG_Param_Temp.CG_Zero_Right_Ad = CG_Ad;
-            break;
-        case 5:
-            CG_Param_Temp.CG_Max_Left_Ad   = CG_Ad;
-            break;
-        case 7:
-            CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad;
-            break;
-        case 9:
-            /* [B3] All five CG fields are written together to a new
-             * validated A/B snapshot, never to legacy overlapping bytes. */
+        case 0: CG_Param_Temp.CG_Zero_Left_Ad  = CG_Ad; break;
+        case 2: CG_Param_Temp.CG_Zero_Right_Ad = CG_Ad; break;
+        case 4: CG_Param_Temp.CG_Max_Left_Ad   = CG_Ad; break;
+        case 6: CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad; break;
+        case 8:
             CG_Param_Temp.temp = Temp;
             if (!CG_Calibration_Sane(&CG_Param_Temp))
             {
-                CG_Calibration_Status = 8U;
-                CG_Cal_Save_Failed = 2U; /* Invalid 180mm AD span/zero gap */
-                CG_Calibration_Status_History = 0xFFU;
-                Beep_Ctrl(100,3);
+                Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History,
+                                 CAL_SAVE_BAD_POINTS);
                 return;
             }
-            if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
+            if (!Eep_Save_CG_Calibration(CG_Param_Temp))
             {
-                CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
-                CG_Cal_Save_Failed = 1U; /* [CGFIX-03] Do not claim success. */
-                CG_Calibration_Status_History = 0xFFU; /* force OLED_Clear() */
-                Beep_Ctrl(100,3);
+                Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History,
+                                 CAL_SAVE_FAILED);
                 return;
             }
-            /* [CGFIX-01] Eep_Save_CG_Calibration updates CG_Param only
-             * after verified commit. Recompute K/B for immediate use. */
-            CG_Data_Init();
-            CG_Cal_Save_Failed = 0U;
+            CG_Data_Init(); /* Only after verified snapshot commit. */
             Beep_Ctrl(100,1);
             break;
     }
+    CG_Cal_Save_Failed = CAL_SAVE_OK;
+    CG_Calibration_Status = (uint8_t)(step + 1U);
 }
-
-
-
 
 void GJ_Calibration_Storage(void)
 {
-    GJ_Calibration_Status++;
-    switch(GJ_Calibration_Status)
+    uint8_t step = GJ_Calibration_Status;
+    if (step >= 8U) return;
+    if ((step & 1U) == 0U)
     {
-        case 1:
-            GJ_Param_Temp.GJ_1410_Ad   = GJ_Ad;
-            break;
-        case 3:
-            GJ_Param_Temp.GJ_1435_Ad   = GJ_Ad;
-            break;
-        case 5:
-            GJ_Param_Temp.GJ_1470_Ad   = GJ_Ad;
-            break;
-        case 7:
-            /* [B3] One validated atomic-ish A/B update for GJ points. */
+        /* Gauge's raw points do not use temperature. The stored reference
+         * temperature must be valid, as must the live link, at commit. */
+        uint8_t error = Calibration_Input_Error(1U, step == 6U);
+        if (error != CAL_SAVE_OK)
+        {
+            Calibration_Fail(&GJ_Cal_Save_Failed, &GJ_Calibration_Status_History, error);
+            return;
+        }
+    }
+    switch (step)
+    {
+        case 0: GJ_Param_Temp.GJ_1410_Ad = GJ_Ad; break;
+        case 2: GJ_Param_Temp.GJ_1435_Ad = GJ_Ad; break;
+        case 4: GJ_Param_Temp.GJ_1470_Ad = GJ_Ad; break;
+        case 6:
             GJ_Param_Temp.temp = Temp;
-            if (Eep_Save_GJ_Calibration(GJ_Param_Temp) == 0)
+            if (!Eep_Save_GJ_Calibration(GJ_Param_Temp))
             {
-                GJ_Calibration_Status = 6;
-                Beep_Ctrl(100,3);
+                Calibration_Fail(&GJ_Cal_Save_Failed, &GJ_Calibration_Status_History,
+                                 CAL_SAVE_FAILED);
                 return;
             }
             Beep_Ctrl(100,1);
             break;
     }
+    GJ_Cal_Save_Failed = CAL_SAVE_OK;
+    GJ_Calibration_Status = (uint8_t)(step + 1U);
 }
 
 void CH_Calibration_Storage(void)
 {
-    CH_Calibration_Status++;
-    switch(CH_Calibration_Status)
+    uint8_t step = CH_Calibration_Status;
+    if (step >= 6U) return;
+    if ((step & 1U) == 0U)
     {
-        case 1:
-            CH_Param_Temp.CZ_Ad = GJ_Ad;
-            break;
-        case 3:
-            CH_Param_Temp.HB_Ad = GJ_Ad;
-            break;
-        case 5:
-            /* [B3] CH ADC/temperature now stored outside legacy node index. */
+        uint8_t error = Calibration_Input_Error(1U, step == 4U);
+        if (error != CAL_SAVE_OK)
+        {
+            Calibration_Fail(&CH_Cal_Save_Failed, &CH_Calibration_Status_History, error);
+            return;
+        }
+    }
+    switch (step)
+    {
+        case 0: CH_Param_Temp.CZ_Ad = GJ_Ad; break;
+        case 2: CH_Param_Temp.HB_Ad = GJ_Ad; break;
+        case 4:
             CH_Param_Temp.temp = Temp;
-            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
+            if (!Eep_Save_CH_Calibration(CH_Param_Temp))
             {
-                CH_Calibration_Status = 4;
-                Beep_Ctrl(100,3);
+                Calibration_Fail(&CH_Cal_Save_Failed, &CH_Calibration_Status_History,
+                                 CAL_SAVE_FAILED);
                 return;
             }
             Beep_Ctrl(100,1);
             break;
     }
+    CH_Cal_Save_Failed = CAL_SAVE_OK;
+    CH_Calibration_Status = (uint8_t)(step + 1U);
 }
-
 
 
 

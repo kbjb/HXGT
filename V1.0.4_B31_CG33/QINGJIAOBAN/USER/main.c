@@ -24,9 +24,9 @@ GPIO_STR testLed_gpio   = GPIO_CLASS_CREATE(GPIOC,GPIO_Pin_13,GPIO_Mode_Out_PP,G
 GPIO_STR Beep_gpio      = GPIO_CLASS_CREATE(GPIOA,GPIO_Pin_8,GPIO_Mode_Out_PP,GPIO_Speed_50MHz);
 //ADS1110对象创建
 GPIO_STR ads1110_scl_str   = GPIO_CLASS_CREATE(ADS1110_SCL_PORT,ADS1110_SCL_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz); 
-GPIO_STR ads1110_sda_str   = GPIO_CLASS_CREATE(ADS1110_SDA_PORT,ADS1110_SDA_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz);
+GPIO_STR ads1110_sda_str   = GPIO_CLASS_CREATE(ADS1110_SDA_PORT,ADS1110_SDA_PIN,GPIO_Mode_Out_OD,GPIO_Speed_50MHz);
 
-IIC_STR  ads1110_iic_str   = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,10000,NULL);
+IIC_STR  ads1110_iic_str   = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,64U,NULL);
 
 ADS1110_STR ads1110_str    = ADS1110_CLASS_STR(&ads1110_iic_str);
 //ADC161对象创建
@@ -130,7 +130,6 @@ void idwg_Init(void)
     IWDG_Enable();
 }
 //变量定义区
-#define ADS1110_BUFFER_SIZE 50
 
 
 volatile uint8_t  send_en                           = 0; /* [B2] SysTick -> main */
@@ -138,9 +137,6 @@ volatile uint16_t send_cnt                           = 0; /* [B2] 1 ms tick */
 volatile uint32_t uart1_ack_ok_count                  = 0; /* [B2] diagnostic */
 volatile uint32_t uart1_ack_error_count               = 0; /* [B2] diagnostic */
 volatile uint32_t uart1_ack_bad_count                 = 0; /* [B2] malformed ACK */
-uint8_t     ads1110_cnt                             = 0;
-uint16_t    ads1110_buffer[ADS1110_BUFFER_SIZE];
-uint16_t    ads1110_aver;
 float       temper = NAN; /* No valid conversion at boot; preserve wire format. */
 static uint32_t temperature_last_ms = 0U;
 
@@ -190,8 +186,7 @@ int main(void)
     usart1_str.str_init(&usart1_str);
     usart1_str.iqrn = USART1_IQRN; 
     /*配置ADS1110*/
-    ads1110_str.str_init(&ads1110_str);
-    ads1110_str.check(&ads1110_str);
+    ADS1110_Init(&ads1110_str, 0U);
     /*配置ADC161*/
     adc161_str.str_init(&adc161_str);
     /*配置LM9531*/
@@ -209,12 +204,7 @@ int main(void)
         /*
             距离传感器
         */
-        ads1110_str.read(&ads1110_str);     //获取ADS1110数据
-        if((ads1110_str.config>>7) == 0)    //判断数据是否刷新
-        {
-            //ads1110_aver    = umove_average(ads1110_buffer,ADS1110_BUFFER_SIZE,&ads1110_cnt,(ads1110_str.ad_data>0x7FFF?0:ads1110_str.ad_data));//滑动均值滤波  
-            ads1110_aver    = ads1110_aver*0.5+0.5*(ads1110_str.ad_data>0x7FFF?0:ads1110_str.ad_data);//一阶低通滤波
-        }
+        ADS1110_Poll(&ads1110_str, sensor_tick_ms);
         
         /*
             倾角传感器
@@ -273,8 +263,9 @@ int main(void)
             FToI fToI;
             UToI uToI;
             uint8_t buffer[13] = {0x5A};
-            buffer[2] = (ads1110_aver>>8)&0xFF;
-            buffer[3] =  ads1110_aver&0xFF;
+            uint16_t gauge_ad = ADS1110_WireValue(&ads1110_str, sensor_tick_ms);
+            buffer[2] = (gauge_ad>>8)&0xFF;
+            buffer[3] =  gauge_ad&0xFF;
             uToI.inf = adc161_aver;
             buffer[4] = (uToI.uinf>>8)&0xFF;
             buffer[5] =  uToI.uinf&0xFF;

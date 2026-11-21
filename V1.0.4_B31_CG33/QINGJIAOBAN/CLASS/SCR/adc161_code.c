@@ -10,9 +10,13 @@ void ADC161_DELAY(uint32_t tim)
 
 void ADC161_INIT(ADC161_STR *adc161_str)
 {
-    adc161_str->cs->str_init(adc161_str->cs);
     adc161_str->clk->str_init(adc161_str->clk);
     adc161_str->out->str_init(adc161_str->out);
+    adc161_str->clk->write(adc161_str->clk, Bit_SET);
+    adc161_str->cs->str_init(adc161_str->cs);
+    /* Begin the first sample with the same idle levels as later samples.
+     * A GPIO reset latch is low; do not leave CS selected after init. */
+    adc161_str->cs->write(adc161_str->cs, Bit_SET);
 }
 
 /* [CG32-02] Standard 16-bit two's-complement interpretation.

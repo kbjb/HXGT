@@ -1,71 +1,105 @@
 #include "ads1110_head.h"
 
-void ADS1110_INIT(ADS1110_STR *ads1110_str)
+#define ADS1110_NOT_NEW  0x80U
+#define ADS1110_CFG_MASK 0x7FU
+
+static uint8_t ADS1110_BusIdle(IIC_STR *bus)
 {
-    ads1110_str->iic_str->str_init(ads1110_str->iic_str);
-    
+    return bus->sclk_gpio->read(bus->sclk_gpio) == Bit_SET &&
+           bus->sda_gpio->read(bus->sda_gpio) == Bit_SET;
 }
 
-
-void ADS1110_READ(ADS1110_STR *ads1110_str)
+static uint8_t ADS1110_Configure(IIC_STR *bus)
 {
-    uint8_t data1,data2,data3;
-    
-    ads1110_str->iic_str->start(ads1110_str->iic_str);
-    ads1110_str->iic_str->send_byte(ads1110_str->iic_str,ADS1110_READ_REG);
-    if(ads1110_str->iic_str->wait_ack(ads1110_str->iic_str) == 1)
+    uint8_t ok = 0U;
+    if (!ADS1110_BusIdle(bus)) return 0U;
+    bus->start(bus);
+    bus->send_byte(bus, ADS1110_WRITE_REG);
+    if (!bus->wait_ack(bus))
     {
-        ads1110_str->iic_str->stop(ads1110_str->iic_str);
+        bus->send_byte(bus, ADS1110_CONFIG_REG_DATA);
+        ok = !bus->wait_ack(bus);
+    }
+    bus->stop(bus);
+    return ok;
+}
+
+void ADS1110_Init(ADS1110_STR *adc, uint32_t now_ms)
+{
+    adc->iic_str->str_init(adc->iic_str);
+    adc->last_poll_ms = now_ms - ADS1110_POLL_MS; /* first poll immediately */
+    adc->last_valid_ms = now_ms;
+    adc->valid = 0U;
+    adc->config = 0U;
+    adc->filtered = 0U;
+    adc->status = ADS1110_Configure(adc->iic_str) ? ADS1110_WAITING : ADS1110_BUS_ERROR;
+}
+
+void ADS1110_Poll(ADS1110_STR *adc, uint32_t now_ms)
+{
+    IIC_STR *bus = adc->iic_str;
+    uint8_t high, low, config;
+    uint16_t raw;
+
+    if ((uint32_t)(now_ms - adc->last_poll_ms) < ADS1110_POLL_MS) return;
+    adc->last_poll_ms = now_ms;
+    if (adc->valid && (uint32_t)(now_ms - adc->last_valid_ms) >= ADS1110_STALE_MS)
+    {
+        adc->valid = 0U;
+        adc->status = ADS1110_STALE;
+    }
+    if (!ADS1110_BusIdle(bus))
+    {
+        adc->valid = 0U;
+        adc->status = ADS1110_BUS_ERROR;
         return;
     }
-    data1 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
-    ads1110_str->iic_str->ack(ads1110_str->iic_str);
-    data2 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
-    ads1110_str->iic_str->ack(ads1110_str->iic_str);
-    data3 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
-    ads1110_str->iic_str->ack(ads1110_str->iic_str);
-    ads1110_str->iic_str->stop(ads1110_str->iic_str);
-    
-    ads1110_str->ad_data = (data1<<8)|data2;
-    ads1110_str->config  = data3;
-}
-
-void ADS1110_WRITE(ADS1110_STR *ads1110_str,uint8_t data)
-{
-    ads1110_str->iic_str->start(ads1110_str->iic_str);
-    ads1110_str->iic_str->send_byte(ads1110_str->iic_str,ADS1110_WRITE_REG);
-    if(ads1110_str->iic_str->wait_ack(ads1110_str->iic_str) == 1)
+    bus->start(bus);
+    bus->send_byte(bus, ADS1110_READ_REG);
+    if (bus->wait_ack(bus))
     {
-        ads1110_str->iic_str->stop(ads1110_str->iic_str);
+        bus->stop(bus);
+        adc->valid = 0U;
+        adc->status = ADS1110_BUS_ERROR;
         return;
     }
-    ads1110_str->iic_str->send_byte(ads1110_str->iic_str,data);
-    ads1110_str->iic_str->wait_ack(ads1110_str->iic_str);
-    ads1110_str->iic_str->stop(ads1110_str->iic_str);
+    high = bus->read_byte(bus);
+    bus->ack(bus);
+    low = bus->read_byte(bus);
+    bus->ack(bus);
+    config = bus->read_byte(bus);
+    bus->nack(bus);
+    bus->stop(bus);
+
+    adc->config = config;
+    if ((config & ADS1110_CFG_MASK) != ADS1110_CONFIG_REG_DATA)
+    {
+        adc->valid = 0U;
+        adc->status = ADS1110_Configure(bus) ? ADS1110_CONFIG_ERROR : ADS1110_BUS_ERROR;
+        return;
+    }
+    if (config & ADS1110_NOT_NEW) return; /* never filter the same sample twice */
+
+    raw = (uint16_t)(((uint16_t)high << 8) | low);
+    if (raw > 0x7FFFU)
+    {
+        /* The nonnegative displacement path cannot use a negative
+         * differential reading. Do not make it a plausible zero. */
+        adc->valid = 0U;
+        adc->status = ADS1110_NEGATIVE;
+        return;
+    }
+    if (adc->valid)
+        adc->filtered = (uint16_t)(((uint32_t)adc->filtered + raw) / 2U);
+    else
+        adc->filtered = raw; /* prime on first/recovered genuine sample */
+    adc->last_valid_ms = now_ms;
+    adc->valid = 1U;
+    adc->status = ADS1110_VALID;
 }
 
-
-uint8_t ADS1110_CHECK(ADS1110_STR *ads1110_str)
+uint16_t ADS1110_WireValue(const ADS1110_STR *adc, uint32_t now_ms)
 {
-    ads1110_str->write(ads1110_str,ADS1110_CONFIG_REG_DATA);
-    ads1110_str->read(ads1110_str);
-    if((ads1110_str->config&0x0F) == (ADS1110_CONFIG_REG_DATA&0x0F))
-        return 0;
-    return 1;
+    return (adc->valid && (uint32_t)(now_ms - adc->last_valid_ms) < ADS1110_STALE_MS) ?
+           adc->filtered : ADS1110_GAUGE_INVALID;
 }
-
-void ADS1110_STR_INIT(ADS1110_STR *ads1110_str)
-{
-    ads1110_str->init = ADS1110_INIT;
-    ads1110_str->check = ADS1110_CHECK;
-    ads1110_str->read = ADS1110_READ;
-    ads1110_str->write = ADS1110_WRITE;
-    ads1110_str->init(ads1110_str);
-}
-
-
-
-
-
-
-

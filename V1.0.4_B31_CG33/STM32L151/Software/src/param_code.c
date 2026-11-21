@@ -53,7 +53,9 @@ uint8_t Percision_Menu_Select = 0;              //精度设置界面  当前选择精度项
 uint8_t Percision_Menu_Select_History = 1;      //精度设置界面  上一次选择精度项
 uint8_t Data_Show_Percision = 1;                //精度设置界面  当前设置精度  0：精度1    1：精度2
 
-uint8_t CG_Cal_Save_Failed = 0;                 // [CG32-05] 0=OK,1=EEP,2=bad CG cal,3=no sensor
+uint8_t CG_Cal_Save_Failed = CAL_SAVE_OK;
+uint8_t GJ_Cal_Save_Failed = CAL_SAVE_OK;
+uint8_t CH_Cal_Save_Failed = CAL_SAVE_OK;
 uint8_t CG_Calibration_Status = 0;              //超高标定界面  当前超高标定步骤
 uint8_t CG_Calibration_Status_History = 1;      //超高标定界面  上一次超高标定步骤
 

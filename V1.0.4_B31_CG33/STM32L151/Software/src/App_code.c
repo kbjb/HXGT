@@ -32,7 +32,7 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG34-RC1",FONT_8X16);
+    OLED_PrintString(40,4,"CG34-RC2",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
@@ -105,7 +105,7 @@ void Main_Page_Reflash(void)
     uint8_t gj_state;
     GJ_Value = Get_GJ_Value(GJ_Ad, Temp);
     gj_state = !eep_valid ? CG_RESULT_EEP_ERROR :
-               (!fresh ? CG_RESULT_NO_SENSOR :
+               ((!fresh || GJ_Ad > 0x7FFFU) ? CG_RESULT_NO_SENSOR :
                 (GJ_Result_Is_Valid() ? CG_RESULT_OK : CG_RESULT_CAL_ERROR));
     if (Main_Values_Need_Redraw || GJ_Display_Status_History != gj_state ||
         (gj_state == CG_RESULT_OK && GJ_Value_History != GJ_Value))
@@ -511,10 +511,20 @@ void Percision_Menu_Page_Reflash(void)
 //static uint32_t CG_Calibration_Tim_Current = 0;
 //static uint32_t CG_Calibration_Tim_History = 0;
 
+static char *Calibration_Error_Label(uint8_t error)
+{
+    if (error == CAL_SAVE_NO_SENSOR) return "NO SENSOR";
+    if (error == CAL_SAVE_TEMP_ERROR) return "TEMP ERR";
+    if (error == CAL_SAVE_SENSOR_ERROR) return "SENSOR ERR";
+    if (error == CAL_SAVE_BAD_POINTS) return "CAL ERROR";
+    return "SAVE FAIL";
+}
+
 void CG_Calibration_Page_Init(void)
 {
     CG_Calibration_Status = 0;
-    CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
+    CG_Calibration_Status_History = 0xFFU;
+    CG_Cal_Save_Failed = CAL_SAVE_OK;
 //    CG_Calibration_Tim_Current = 0;
 //    CG_Calibration_Tim_History = 0;
 }
@@ -542,7 +552,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 1:
             OLED_PrintChinese(40,1,"水平处");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Left_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 2:
@@ -556,7 +566,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 3:
             OLED_PrintChinese(24,1,"水平处掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Right_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 4:
@@ -570,7 +580,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 5:
             OLED_PrintString(44,1,"180mm",FONT_8X16);
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Left_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 6:
@@ -586,18 +596,16 @@ void CG_Calibration_Page_Reflash(void)
         case 7:
             OLED_PrintString(28,1,"180mm",FONT_8X16);
             OLED_PrintChinese(68,1,"掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Right_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 8:
             /* [CGFIX-03] Collected four AD points, NOT saved yet. */
             OLED_PrintChinese(32,1,"超高标定");
-            if(CG_Cal_Save_Failed == 3U)
-                OLED_PrintString(28,4,"NO SENSOR",FONT_8X16);
-            else if(CG_Cal_Save_Failed == 2U)
-                OLED_PrintString(28,4,"CAL ERROR",FONT_8X16);
-            else if(CG_Cal_Save_Failed)
+            if (CG_Cal_Save_Failed == CAL_SAVE_FAILED)
                 OLED_PrintString(28,4,"EEP ERROR",FONT_8X16);
+            else if (CG_Cal_Save_Failed != CAL_SAVE_OK)
+                OLED_PrintString(28,4,Calibration_Error_Label(CG_Cal_Save_Failed),FONT_8X16);
             else
                 OLED_PrintChinese(24,4,"存储键保存");
             break;
@@ -611,14 +619,16 @@ void CG_Calibration_Page_Reflash(void)
             break;
     }
     /* [CG32-05] Error also visible on the four capture prompt pages. */
-    if (CG_Cal_Save_Failed == 3U && CG_Calibration_Status < 8U)
-        OLED_PrintString(28,6,"NO SENSOR",FONT_8X16);
+    if (CG_Cal_Save_Failed != CAL_SAVE_OK && CG_Calibration_Status < 8U)
+        OLED_PrintString(24,6,Calibration_Error_Label(CG_Cal_Save_Failed),FONT_8X16);
 }
 
 /*************************轨距标定设置界面***************************/
 void GJ_Calibration_Page_Init(void)
 {
     GJ_Calibration_Status = 0;
+    GJ_Calibration_Status_History = 0xFFU;
+    GJ_Cal_Save_Failed = CAL_SAVE_OK;
 }
 
 char GJ_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
@@ -637,7 +647,7 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 1:
             OLED_PrintString(36,1,"1410mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1410_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 2:
@@ -646,7 +656,7 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 3:
             OLED_PrintString(36,1,"1435mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1435_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 4:
@@ -655,23 +665,34 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 5:
             OLED_PrintString(36,1,"1470mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1470_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 6:
             OLED_PrintChinese(32,1,"轨距标定");
-            OLED_PrintChinese(48,4,"成功");
+            if (GJ_Cal_Save_Failed != CAL_SAVE_OK)
+                OLED_PrintString(24,4,Calibration_Error_Label(GJ_Cal_Save_Failed),FONT_8X16);
+            else
+                OLED_PrintChinese(24,4,"存储键保存");
             break;
         case 7:
+            OLED_PrintChinese(32,1,"轨距标定");
+            OLED_PrintChinese(48,4,"成功"); /* EEPROM commit has succeeded. */
+            break;
+        case 8:
             set_PageId(page_calibration_menu);
             break;
     }
+    if (GJ_Cal_Save_Failed != CAL_SAVE_OK && GJ_Calibration_Status < 6U)
+        OLED_PrintString(24,6,Calibration_Error_Label(GJ_Cal_Save_Failed),FONT_8X16);
 }
 
 /*************************查护标定设置界面***************************/
 void CH_Calibration_Page_Init(void)
 {
     CH_Calibration_Status = 0;
+    CH_Calibration_Status_History = 0xFFU;
+    CH_Cal_Save_Failed = CAL_SAVE_OK;
 }
 
 char CH_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
@@ -691,7 +712,7 @@ void CH_Calibration_Page_Reflash(void)
         case 1:
             OLED_PrintChinese(32,1,"查");
             OLED_PrintString(48,1,"1391mm",FONT_8X16);
-            snprintf(CH_buffer,sizeof(CH_buffer),"%05d",GJ_Ad);
+            snprintf(CH_buffer,sizeof(CH_buffer),"%05u",(unsigned)CH_Param_Temp.CZ_Ad);
             OLED_PrintString(44,4,CH_buffer,FONT_8X16);
             break;
         case 2:
@@ -701,17 +722,26 @@ void CH_Calibration_Page_Reflash(void)
         case 3:
             OLED_PrintChinese(32,1,"护");
             OLED_PrintString(48,1,"1348mm",FONT_8X16);
-            snprintf(CH_buffer,sizeof(CH_buffer),"%05d",GJ_Ad);
+            snprintf(CH_buffer,sizeof(CH_buffer),"%05u",(unsigned)CH_Param_Temp.HB_Ad);
             OLED_PrintString(44,4,CH_buffer,FONT_8X16);
             break;
         case 4:
             OLED_PrintChinese(32,1,"查护标定");
-            OLED_PrintChinese(48,4,"成功");
+            if (CH_Cal_Save_Failed != CAL_SAVE_OK)
+                OLED_PrintString(24,4,Calibration_Error_Label(CH_Cal_Save_Failed),FONT_8X16);
+            else
+                OLED_PrintChinese(24,4,"存储键保存");
             break;
         case 5:
+            OLED_PrintChinese(32,1,"查护标定");
+            OLED_PrintChinese(48,4,"成功"); /* EEPROM commit has succeeded. */
+            break;
+        case 6:
             set_PageId(page_calibration_menu);
             break;
     }
+    if (CH_Cal_Save_Failed != CAL_SAVE_OK && CH_Calibration_Status < 4U)
+        OLED_PrintString(24,6,Calibration_Error_Label(CH_Cal_Save_Failed),FONT_8X16);
 }
 
 
