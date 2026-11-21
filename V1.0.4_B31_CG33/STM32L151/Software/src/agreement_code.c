@@ -10,8 +10,11 @@ static volatile uint8_t Sensor_Frame_Seen = 0;
 
 uint8_t Sensor_Data_Is_Fresh(void)
 {
-    return (uint8_t)(Sensor_Frame_Seen &&
-        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) < SENSOR_LINK_TIMEOUT_MS);
+    /* Foreground-only: once expired, stay expired until a new valid frame. */
+    if (Sensor_Frame_Seen &&
+        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= SENSOR_LINK_TIMEOUT_MS)
+        Sensor_Frame_Seen = 0U;
+    return Sensor_Frame_Seen;
 }
 
 int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
@@ -53,6 +56,7 @@ uint8_t Get_Add_Verify(uint8_t *buffp,uint8_t len)
 
 uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
 {
+    uint32_t rx_tick;
     /* [B1] Exactly 13 bytes are needed before any fixed-position read. */
     if(data == NULL || length != 13) return 0;
     if(data[0] != 0x5A || data[length-2]!=0x0D || data[length-1]!=0x0A)
@@ -61,13 +65,22 @@ uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
         return 1;
     if(data[length-3] != Get_Add_Verify(data,length-3))
         return 2;
+    /* A busy foreground (e.g. EEPROM scan during boot) may serve the
+     * mailbox long after RX. Acknowledge a well-formed stale frame without
+     * publishing its data or pretending the sensor just reported. */
+    rx_tick = UART_Get_Frame_Rx_Tick(UART1_ID);
+    if ((uint32_t)(HAL_GetTick() - rx_tick) >= SENSOR_LINK_TIMEOUT_MS)
+    {
+        Sensor_Frame_Seen = 0U;
+        return 3U;
+    }
     /* [B2] Shift unsigned 32-bit fields, avoiding signed-shift UB. */
     GJ_Ad = (uint16_t)(((uint16_t)data[2] << 8) | data[3]);
     CG_Ad = Unsigned_Six_To_Signed_Six((uint16_t)(((uint16_t)data[4] << 8) | data[5]));
     Temp  = Unsigned_Six_To_Float(((uint32_t)data[6] << 24) |
                                   ((uint32_t)data[7] << 16) |
                                   ((uint32_t)data[8] << 8) | (uint32_t)data[9]);
-    Sensor_Last_Valid_Tick = HAL_GetTick();
+    Sensor_Last_Valid_Tick = rx_tick;
     Sensor_Frame_Seen = 1;
     return 3;
 }

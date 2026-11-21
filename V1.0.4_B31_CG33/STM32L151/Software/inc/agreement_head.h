@@ -62,7 +62,7 @@ void Agreement_Ack_For_Uart2(uint8_t uart_id,uint8_t* data, uint16_t length);
 
 void Agreement_Ack_For_Fun(void);
 /* [B2] Fresh if a correctly checked sensor frame was received in last 1.5s. */
-#define SENSOR_LINK_TIMEOUT_MS 1500U /* [B2] Three 500ms report periods. */
+#define SENSOR_LINK_TIMEOUT_MS 1500U /* [B2] Keep compatible with older 500ms sensor boards. */
 uint8_t Sensor_Data_Is_Fresh(void);
 
 

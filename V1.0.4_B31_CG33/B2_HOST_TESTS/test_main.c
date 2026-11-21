@@ -129,6 +129,19 @@ int main(void) {
     fake_tick=1500; CHECK(!Sensor_Data_Is_Fresh());
     u1(15123,-1,-2.5f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
     CHECK(GJ_Ad==15123 && CG_Ad==-1 && Temp==-2.5f);
+    /* A foreground delay must not grant the frame a new freshness window.
+     * A newer frame dropped by the single-slot mailbox cannot refresh it. */
+    fake_tick=3000U; u1(8,9,10.0f,f); feed(&huart1,f,13);
+    fake_tick=4300U; u1(11,12,13.0f,g); feed(&huart1,g,13);
+    CHECK(UART_Get_Frame_Rx_Tick(UART1_ID)==3000U);
+    fake_tick=4500U; UART_Process_Received(UART1_ID);
+    CHECK(!Sensor_Data_Is_Fresh() && GJ_Ad==15123 && CG_Ad==-1 && Temp==-2.5f);
+    fake_tick=UINT32_MAX-100U; feed(&huart1,f,13);
+    fake_tick=0U; UART_Process_Received(UART1_ID);
+    CHECK(Sensor_Data_Is_Fresh() && GJ_Ad==8 && CG_Ad==9);
+    fake_tick=1398U; CHECK(Sensor_Data_Is_Fresh());
+    fake_tick=1399U; CHECK(!Sensor_Data_Is_Fresh());
+    fake_tick=UINT32_MAX-95U; CHECK(!Sensor_Data_Is_Fresh());
     f[10]^=0x40;
     before=ntx1;
     feed(&huart1,f,13); UART_Process_Received(UART1_ID);

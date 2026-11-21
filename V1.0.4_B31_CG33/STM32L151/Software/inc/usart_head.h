@@ -23,6 +23,7 @@ typedef struct {
     uint8_t  frame_buffer[UART_RX_BUFFER_SIZE]; /* [B2] Foreground mailbox. */
     volatile uint8_t frame_ready;
     volatile uint16_t frame_length;
+    volatile uint32_t frame_rx_tick; /* Last byte of THIS accepted mailbox frame. */
     volatile uint32_t bad_frame_count;
     volatile uint32_t dropped_frame_count;
     volatile uint32_t error_count;
@@ -57,6 +58,7 @@ void     UART_Manager_Init(UART_ID_t usart_id);
 void     UART_Start_Receive(UART_ID_t uart_id);
 void     UART_Send_Data(UART_ID_t uart_id, uint8_t* data, uint16_t length);
 uint8_t  UART_Is_Frame_Ready(UART_ID_t uart_id);
+uint32_t UART_Get_Frame_Rx_Tick(UART_ID_t uart_id);
 uint16_t UART_Get_Frame_Length(UART_ID_t uart_id);
 uint8_t* UART_Get_Frame_Data(UART_ID_t uart_id);
 void     UART_Clear_Frame_Flag(UART_ID_t uart_id);
