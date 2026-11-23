@@ -12,8 +12,10 @@
 
 #include "data_head.h"
 
-#define VERSION "1.0.2" /* [B2] UART protocol reliability update. */
-#define SENSOR_SEND_PERIOD_MS 100U /* [B2] 2Hz sensor reports, independent of ACK. */
+#define VERSION "CG34_TEST"
+#define SENSOR_SAMPLE_PERIOD_MS 20U
+#define SENSOR_SEND_PERIOD_MS   100U /* 10 Hz, independent of ACK. */
+extern volatile uint32_t sensor_tick_ms;
 
 
 

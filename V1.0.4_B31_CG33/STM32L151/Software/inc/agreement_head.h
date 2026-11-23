@@ -62,8 +62,19 @@ void Agreement_Ack_For_Uart2(uint8_t uart_id,uint8_t* data, uint16_t length);
 
 void Agreement_Ack_For_Fun(void);
 /* [B2] Fresh if a correctly checked sensor frame was received in last 1.5s. */
-#define SENSOR_LINK_TIMEOUT_MS 1500U /* [B2] Three 500ms report periods. */
+#define SENSOR_LINK_TIMEOUT_MS 1500U
 uint8_t Sensor_Data_Is_Fresh(void);
+
+/* [CG34] A calibration point requires 10 fresh 100 ms frames, spanning
+ * at least 900 ms, with at most 3 AD peak-to-peak variation. */
+#define CG_CAL_STABLE_SAMPLES   10U
+#define CG_CAL_STABLE_TIME_MS   900U
+#define CG_CAL_MAX_GAP_MS       250U
+#define CG_CAL_STABLE_RANGE_AD  3L
+void Sensor_CG_Stability_Reset(void);
+uint8_t Sensor_Get_Stable_CG(int16_t *value);
+extern volatile int32_t CG_Calibration_Range_AD;
+
 
 
 

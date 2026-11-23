@@ -1,0 +1,10 @@
+CG35 TEST / 2026-11-23
+Mainboard Keil ARMCC 5.06 update 7 build 960 full rebuild PASS, 0 errors / 0 warnings.
+CG34 pre-fix code FAILS the reversed-zero edge regression (reproduced before editing).
+CG35 fixed code PASSES all seven calibration fixtures, each swept over all 65536 AD codes.
+Checks cover both zero orders, equal zero points, 1500 AD gap, minimum allowed spans,
+signed AD extremes, continuity, monotonicity, +/-180 mm endpoints, direction and temperature.
+Existing CG startup, invalid calibration, unbounded numeric output, save/retry and stable capture tests PASS.
+Windows GCC 15.1.0 functional tests used available options. libubsan is unavailable on this host.
+Intel HEX checksums, vector table and flash addresses verified.
+Physical-board zero accuracy and response time require device testing.

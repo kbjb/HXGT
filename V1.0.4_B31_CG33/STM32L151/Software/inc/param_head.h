@@ -198,7 +198,7 @@ extern uint8_t Percision_Menu_Select ;
 extern uint8_t Percision_Menu_Select_History ;
 extern uint8_t Data_Show_Percision ;
 
-extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor */
+extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor,4=unstable */
 extern uint8_t CG_Calibration_Status;
 extern uint8_t CG_Calibration_Status_History;
 

@@ -41,8 +41,13 @@
     if(iic_str->delay!=NULL) iic_str->delay(iic_str);
     else IIC_DELAY(iic_str->delay_cnt);
     iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_SET);
+    if(iic_str->delay!=NULL) iic_str->delay(iic_str);
+    else IIC_DELAY(iic_str->delay_cnt);
     if(iic_str->sda_gpio->read(iic_str->sda_gpio) == Bit_SET)
+    {
+        iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_RESET);
         return 1;
+    }
     iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_RESET);
         return 0;
  }

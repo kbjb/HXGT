@@ -6,8 +6,8 @@ static unsigned checks = 0;
 #define CHECK(p) do { assert(p); checks++; } while(0)
 static void stabilize(CG_ANGLE_FILTER *f, int16_t v)
 {
-    int i;
-    for (i=0; i<35; ++i) CG_AngleFilter_Push(f,v);
+    unsigned i;
+    for (i=0; i<CG_ANGLE_WINDOW_SIZE+5; ++i) CG_AngleFilter_Push(f,v);
 }
 int main(void)
 {
@@ -35,6 +35,15 @@ int main(void)
         stabilize(&f,(int16_t)v);
         CHECK(f.output_value<=v && v-f.output_value<CG_ANGLE_DEADBAND_AD);
     }
+    /* A stationary alternating +/-10 AD disturbance averages to zero. */
+    CG_AngleFilter_Init(&f);
+    for (unsigned i=0; i<200; ++i) {
+        CG_AngleFilter_Push(&f, (int16_t)(1000 + ((i&1) ? 10 : -10)));
+        if (i>=CG_ANGLE_WINDOW_SIZE) CHECK(f.filtered_value==1000);
+    }
+    /* An ideal step fully replaces the 800 ms window in at most 40 samples. */
+    for (unsigned i=0; i<CG_ANGLE_WINDOW_SIZE; ++i) CG_AngleFilter_Push(&f,12000);
+    CHECK(f.filtered_value==12000 && f.output_value==12000);
     printf("CG32 filter: PASS (%u checks, -32768..32767, %ld AD, spike/return)\n", checks, CG_ANGLE_DEADBAND_AD);
     return 0;
 }

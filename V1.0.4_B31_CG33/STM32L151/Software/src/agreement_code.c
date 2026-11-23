@@ -14,6 +14,48 @@ uint8_t Sensor_Data_Is_Fresh(void)
         (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) < SENSOR_LINK_TIMEOUT_MS);
 }
 
+
+static int16_t CG_Capture_Samples[CG_CAL_STABLE_SAMPLES];
+static uint32_t CG_Capture_Ticks[CG_CAL_STABLE_SAMPLES];
+static uint8_t CG_Capture_Index = 0U;
+static uint8_t CG_Capture_Count = 0U;
+volatile int32_t CG_Calibration_Range_AD = 0;
+
+void Sensor_CG_Stability_Reset(void)
+{
+    CG_Capture_Count = 0U;
+    CG_Capture_Index = 0U;
+    CG_Calibration_Range_AD = 0;
+}
+
+uint8_t Sensor_Get_Stable_CG(int16_t *value)
+{
+    int16_t lowest = INT16_MAX, highest = INT16_MIN;
+    int32_t sum = 0;
+    uint8_t i;
+    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES ||
+        !Sensor_Data_Is_Fresh() ||
+        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
+        return 0U;
+    for (i = 0U; i < CG_CAL_STABLE_SAMPLES; ++i)
+    {
+        int16_t sample = CG_Capture_Samples[i];
+        if (sample < lowest) lowest = sample;
+        if (sample > highest) highest = sample;
+        sum += sample;
+    }
+    CG_Calibration_Range_AD = (int32_t)highest - (int32_t)lowest;
+    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD ||
+        (uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
+            CG_CAL_STABLE_TIME_MS)
+        return 0U;
+    /* Round the mean symmetrically for positive and negative ADC values. */
+    sum += sum >= 0 ? (int32_t)CG_CAL_STABLE_SAMPLES / 2 :
+                    -(int32_t)CG_CAL_STABLE_SAMPLES / 2;
+    *value = (int16_t)(sum / (int32_t)CG_CAL_STABLE_SAMPLES);
+    return 1U;
+}
+
 int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
 {
     UToI uToi_Temp;
@@ -67,7 +109,17 @@ uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
     Temp  = Unsigned_Six_To_Float(((uint32_t)data[6] << 24) |
                                   ((uint32_t)data[7] << 16) |
                                   ((uint32_t)data[8] << 8) | (uint32_t)data[9]);
-    Sensor_Last_Valid_Tick = HAL_GetTick();
+    {
+        uint32_t now = HAL_GetTick();
+        if (Sensor_Frame_Seen &&
+            (uint32_t)(now - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
+            Sensor_CG_Stability_Reset();
+        CG_Capture_Samples[CG_Capture_Index] = CG_Ad;
+        CG_Capture_Ticks[CG_Capture_Index] = now;
+        CG_Capture_Index = (uint8_t)((CG_Capture_Index + 1U) % CG_CAL_STABLE_SAMPLES);
+        if (CG_Capture_Count < CG_CAL_STABLE_SAMPLES) CG_Capture_Count++;
+        Sensor_Last_Valid_Tick = now;
+    }
     Sensor_Frame_Seen = 1;
     return 3;
 }

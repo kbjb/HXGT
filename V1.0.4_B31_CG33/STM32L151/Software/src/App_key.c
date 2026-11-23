@@ -305,7 +305,8 @@ void Change_Time_For_Set_Time(void)
 
 void CG_Calibration_Storage(void)
 {
-    /* [CG32-05] Never commit a value from a dead 500 ms sensor link. */
+    int16_t captured_ad = 0;
+    /* [CG32-05] Require fresh sensor data before capture or commit. */
     if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
          CG_Calibration_Status == 4U || CG_Calibration_Status == 6U ||
          CG_Calibration_Status == 8U) && !Sensor_Data_Is_Fresh())
@@ -315,7 +316,16 @@ void CG_Calibration_Storage(void)
         Beep_Ctrl(100,3);
         return;
     }
-    if (CG_Cal_Save_Failed == 3U)
+    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
+         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U) &&
+        !Sensor_Get_Stable_CG(&captured_ad))
+    {
+        CG_Cal_Save_Failed = 4U; /* Still moving or not enough fresh samples. */
+        CG_Calibration_Status_History = 0xFFU;
+        Beep_Ctrl(100,3);
+        return;
+    }
+    if (CG_Cal_Save_Failed == 3U || CG_Cal_Save_Failed == 4U)
     {
         CG_Cal_Save_Failed = 0U;
         CG_Calibration_Status_History = 0xFFU;
@@ -324,16 +334,16 @@ void CG_Calibration_Storage(void)
     switch(CG_Calibration_Status)
     {
         case 1:
-            CG_Param_Temp.CG_Zero_Left_Ad  = CG_Ad;
+            CG_Param_Temp.CG_Zero_Left_Ad  = captured_ad;
             break;
         case 3:
-            CG_Param_Temp.CG_Zero_Right_Ad = CG_Ad;
+            CG_Param_Temp.CG_Zero_Right_Ad = captured_ad;
             break;
         case 5:
-            CG_Param_Temp.CG_Max_Left_Ad   = CG_Ad;
+            CG_Param_Temp.CG_Max_Left_Ad   = captured_ad;
             break;
         case 7:
-            CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad;
+            CG_Param_Temp.CG_Max_Right_Ad  = captured_ad;
             break;
         case 9:
             /* [B3] All five CG fields are written together to a new
@@ -362,6 +372,7 @@ void CG_Calibration_Storage(void)
             Beep_Ctrl(100,1);
             break;
     }
+    if (CG_Calibration_Status < 8U) Sensor_CG_Stability_Reset();
 }
 
 

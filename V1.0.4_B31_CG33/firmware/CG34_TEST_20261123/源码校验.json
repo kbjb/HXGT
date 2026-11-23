@@ -1,0 +1,19 @@
+{
+  "QINGJIAOBAN/USER/cg_angle_filter.h": "c1ce0e9fb0375895610633583d9b46b73a1eba88a10ec2d7f7ba6e83b15ed956",
+  "QINGJIAOBAN/USER/main_head.h": "b627946f6b4e5bf9baf1f77a48d1a9d61cf32e4722f86236b84961d72b6796a4",
+  "QINGJIAOBAN/USER/stm32f10x_it.c": "cfb660b6233f340d5d2cb78d0235271b985802ffceebb138edf45c764b64c9bb",
+  "QINGJIAOBAN/USER/main.c": "43814a7d84c2cfa3f46224a4563e693a613dd200bbb2f11ea7fd61ad365f1643",
+  "QINGJIAOBAN/CLASS/SCR/iic_code.c": "f29f543b865799146e6acf7e1d2f24b334a6ba6086642515d6e50610a9055f28",
+  "QINGJIAOBAN/CLASS/SCR/ads1110_code.c": "8064c9ac38db9e4e4599ee6173d3dea2e9ebf5eebd98b2f5d7b6f17cfa3e1d80",
+  "STM32L151/Software/inc/agreement_head.h": "cd0ce1cb061a42b016911a2742391ed5959b65d9f33394df45c090a7cc144f12",
+  "STM32L151/Software/src/agreement_code.c": "d44a51817e7b586a79ee338b3e92e72ed84817d697f3e799835a4ab43d818187",
+  "STM32L151/Software/src/App_key.c": "6445760eb22f066f64af490d4ab01ac3029049f9ea3675431ea77311c3920cac",
+  "STM32L151/Software/src/App_code.c": "d92807f8278112be91a724f10f09849af00ae8f8770c7b40058588e795774208",
+  "STM32L151/Software/inc/param_head.h": "5c7e9bdd04787b517f44349d8e11b1555ae0f819512cbcd8d3eb98bf06c26ac8",
+  "tests/CG32_HOST_TESTS/test_filter.c": "31b69582baf9c6b3432a8cbb51e07dd88f2fd08ddc418d221783c62219245212",
+  "tests/B2_HOST_TESTS/test_qing.py": "a4bff7ddf80f2734d993750bc1633f33ea598a8066c215c6ca9153facd565a99",
+  "tests/CG_FIX_HOST_TESTS/test_cg.py": "dc5ce06a7f41241296ff1ad67d0c8f4ef10fc50d75b3651bcb6e1fffdd544aa8",
+  "tests/B2_HOST_TESTS/test_main.c": "4f3a3c3cb5d1764c5ea73fac3cafee8f6c0bd06d5f93bdc44aa420f0f3a48f53",
+  "tests/CG32_HOST_TESTS/run_cg32_tests.sh": "93981642d92781a887ef5acb14e6221c26fd7b28648aead23806d75d638c0628",
+  "tests/CG34_HOST_TESTS/test_sampling.py": "64879e9a92a0d90328f5edb2173db18fe6e94cea65d8539fe2eedde6e6a50d41"
+}

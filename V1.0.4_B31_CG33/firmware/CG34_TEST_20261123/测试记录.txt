@@ -1,0 +1,16 @@
+CG34 TEST / 2026-11-23
+Keil ARMCC 5.06 update 7 build 960
+STM32F103 inclination board rebuild PASS, 0 errors, 0 warnings
+STM32L151 main board rebuild PASS, 0 errors, 0 warnings
+
+Windows GCC 15.1.0 functional regression
+Filter PASS, 202 assertions, full signed range, startup, spikes, 2 AD, 40 samples
+ADC161 bitstream PASS, 7 full-sign cases, 18 clocks
+UART/master and stable capture PASS, 60 assertions, 50,000 noise bytes
+EEPROM B3.1 PASS, 328 assertions, blank scan, A/B, power-loss, existing data protection
+CG calculation/key integration PASS, unstable capture blocked, save failure/retry
+Inclination ACK/scheduler PASS, 120,000 noise bytes, 100 ms reports
+Actual sampling block PASS, 50 Hz, missed-slot recovery, no catch-up bursts, tick wrap
+
+Installed Windows GCC lacks libubsan. Functional tests ran without UBSan.
+No physical-board, sensor noise, I2C waveforms, timing or metrology verification.

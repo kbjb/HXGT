@@ -21,6 +21,7 @@ volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
 
 void CG_Data_Init(void)
 {
+    int16_t zero_low, zero_high;
     /* [CG32-03] Never divide by a tiny or reversed AD separation. */
     CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
     K_CG_Left = 0.0f; B_CG_Left = 0.0f;
@@ -30,12 +31,19 @@ void CG_Data_Init(void)
         CG_Result_Status = CG_RESULT_CAL_ERROR;
         return;
     }
-    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad -
-                           (float)CG_Param.CG_Zero_Left_Ad);
-    B_CG_Left = -K_CG_Left * (float)CG_Param.CG_Zero_Left_Ad;
-    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad -
-                             (float)CG_Param.CG_Zero_Right_Ad);
-    B_CG_Right = -K_CG_Right * (float)CG_Param.CG_Zero_Right_Ad;
+    /* [CG35] Anchor each slope to the edge where that branch is entered.
+     * Both horizontal points define the zero interval in either ordering.
+     * Keep the measured negative/positive AD endpoints mapped to +/-180 mm.
+     * The existing span >=4000 and zero gap <=1500 checks ensure both
+     * sorted-edge denominators remain nonzero (at least 2500 AD). */
+    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
+                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
+                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad - (float)zero_low);
+    B_CG_Left = -K_CG_Left * (float)zero_low;
+    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad - (float)zero_high);
+    B_CG_Right = -K_CG_Right * (float)zero_high;
     CG_Result_Status = CG_RESULT_OK;
 }
 

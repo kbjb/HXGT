@@ -3,12 +3,12 @@
 
 #include <stdint.h>
 
-/* [CG32-01] 30-sample trimmed moving average (discard one min and max).
- * A 10-count output hysteresis is about 0.14 mm at factory CG calibration.
+/* [CG32-01] 40-sample trimmed moving average at 20 ms/sample (discard one min and max).
+ * A 2-count output hysteresis is about 0.029 mm at factory CG calibration.
  * This is a provisional engineering value, NOT an accuracy qualification.
  * C99 and armcc5 compatible; no dynamic allocation or float processing. */
-#define CG_ANGLE_WINDOW_SIZE    30U
-#define CG_ANGLE_DEADBAND_AD     10L
+#define CG_ANGLE_WINDOW_SIZE    40U
+#define CG_ANGLE_DEADBAND_AD     2L
 
 typedef struct
 {

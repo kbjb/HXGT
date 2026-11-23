@@ -135,6 +135,7 @@ void PendSV_Handler(void)
 
 void SysTick_Handler(void)
 {
+    sensor_tick_ms++; /* [CG34] 1 ms sampling clock; all I/O stays in main. */
     /* [B2] The ACK parser is fixed-length and does not use idle-time rx_ok.
      * A periodic scheduler avoids ACK-driven TX/ACK loops. */
     if (++send_cnt >= SENSOR_SEND_PERIOD_MS)

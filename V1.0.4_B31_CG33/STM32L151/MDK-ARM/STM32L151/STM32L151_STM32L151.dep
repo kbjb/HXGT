@@ -38,14 +38,14 @@ I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (../Software/inc/oled_head.h)(0x6AFA46BA)
 I (../Software/inc/usart_head.h)(0x6AFA46BA)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
 I (../Software/inc/adc_head.h)(0x6AFA46BA)
 I (../Software/inc/at24c512_head.h)(0x6AFA46BA)
 I (../Software/inc/pcf8563_head.h)(0x6AFA46BA)
 I (../Software/inc/key_head.h)(0x6AFA46BA)
 I (../Software/inc/App_oled.h)(0x6AFA46BA)
 I (../Software/inc/oledfont.h)(0x6AFA46BA)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Software/inc/App_Eep.h)(0x6AFA46BA)
 I (../Software/inc/Algorithm_head.h)(0x6AFA4984)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
@@ -86,7 +86,7 @@ I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (../Core/Inc/stm32l1xx_it.h)(0x6AFA46BA)
 I (../Software/inc/usart_head.h)(0x6AFA46BA)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
 F (../Core/Src/stm32l1xx_hal_msp.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\stm32l1xx_hal_msp.o --omf_browse stm32l151\stm32l1xx_hal_msp.crf --depend stm32l151\stm32l1xx_hal_msp.d)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
@@ -775,7 +775,7 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
 F (..\Software\src\adc_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\adc_code.o --omf_browse stm32l151\adc_code.crf --depend stm32l151\adc_code.d)
 I (../Software/inc/adc_head.h)(0x6AFA46BA)
 I (../Core/Inc/main.h)(0x6AFA46BA)
@@ -923,9 +923,9 @@ I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (../Software/inc/App_oled.h)(0x6AFA46BA)
 I (../Software/inc/oled_head.h)(0x6AFA46BA)
 I (../Software/inc/oledfont.h)(0x6AFA46BA)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 F (..\Software\src\param_code.c)(0x6AFA47B2)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\param_code.o --omf_browse stm32l151\param_code.crf --depend stm32l151\param_code.d)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
 I (../Core/Inc/stm32l1xx_hal_conf.h)(0x6AFA46BA)
@@ -960,8 +960,8 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-F (..\Software\src\agreement_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\agreement_code.o --omf_browse stm32l151\agreement_code.crf --depend stm32l151\agreement_code.d)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
+F (..\Software\src\agreement_code.c)(0x6B03E310)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\agreement_code.o --omf_browse stm32l151\agreement_code.crf --depend stm32l151\agreement_code.d)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
 I (../Core/Inc/stm32l1xx_hal_conf.h)(0x6AFA46BA)
@@ -996,11 +996,11 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Software/inc/usart_head.h)(0x6AFA46BA)
 I (../Software/inc/App_Eep.h)(0x6AFA46BA)
 I (../Software/inc/at24c512_head.h)(0x6AFA46BA)
-F (..\Software\src\App_code.c)(0x6AFA4984)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\app_code.o --omf_browse stm32l151\app_code.crf --depend stm32l151\app_code.d)
+F (..\Software\src\App_code.c)(0x6B03EDE6)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\app_code.o --omf_browse stm32l151\app_code.crf --depend stm32l151\app_code.d)
 I (../Software/inc/App_oled.h)(0x6AFA46BA)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
@@ -1038,15 +1038,15 @@ I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (../Software/inc/oled_head.h)(0x6AFA46BA)
 I (../Software/inc/oledfont.h)(0x6AFA46BA)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Software/inc/key_head.h)(0x6AFA46BA)
 I (../Software/inc/pcf8563_head.h)(0x6AFA46BA)
 I (../Software/inc/Algorithm_head.h)(0x6AFA4984)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
 I (../Software/inc/App_Eep.h)(0x6AFA46BA)
 I (../Software/inc/adc_head.h)(0x6AFA46BA)
-F (..\Software\src\App_key.c)(0x6AFA47B2)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\app_key.o --omf_browse stm32l151\app_key.crf --depend stm32l151\app_key.d)
+F (..\Software\src\App_key.c)(0x6B03E310)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\app_key.o --omf_browse stm32l151\app_key.crf --depend stm32l151\app_key.d)
 I (../Software/inc/App_key.h)(0x6AFA46BA)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
@@ -1082,7 +1082,7 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Software/inc/pcf8563_head.h)(0x6AFA46BA)
 I (../Software/inc/key_head.h)(0x6AFA46BA)
 I (../Software/inc/App_oled.h)(0x6AFA46BA)
@@ -1092,8 +1092,8 @@ I (../Software/inc/App_Eep.h)(0x6AFA46BA)
 I (../Software/inc/Algorithm_head.h)(0x6AFA4984)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
 I (../Software/inc/cg_cal_guard.h)(0x6AFA4984)
-I (../Software/inc/agreement_head.h)(0x6AFA46BA)
-F (..\Software\src\Algorithm_code.c)(0x6AFA4984)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\algorithm_code.o --omf_browse stm32l151\algorithm_code.crf --depend stm32l151\algorithm_code.d)
+I (../Software/inc/agreement_head.h)(0x6B03E310)
+F (..\Software\src\Algorithm_code.c)(0x6B03EDE6)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O2 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc -I ../Drivers/STM32L1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32L1xx/Include -I ../Drivers/CMSIS/Include -I ../Software/inc-I.\RTE\_STM32L151-ID:\tools\KeilMDK\KeilMDKPage\ARM\CMSIS\5.9.0\CMSIS\Core\Include-D__UVISION_VERSION="538" -D_RTE_ -DSTM32L151xBA -D_RTE_ -DUSE_HAL_DRIVER -DSTM32L151xBA-o stm32l151\algorithm_code.o --omf_browse stm32l151\algorithm_code.crf --depend stm32l151\algorithm_code.d)
 I (../Software/inc/Algorithm_head.h)(0x6AFA4984)
 I (../Core/Inc/main.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal.h)(0x6AFA46BA)
@@ -1129,7 +1129,7 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
 I (../Software/inc/adc_head.h)(0x6AFA46BA)
 I (../Software/inc/cg_cal_guard.h)(0x6AFA4984)
@@ -1170,6 +1170,6 @@ I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_uart.h)(0x6AFA46BA)
 I (../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
-I (../Software/inc/param_head.h)(0x6AFA47B2)
+I (../Software/inc/param_head.h)(0x6B03E310)
 I (../Software/inc/at24c512_head.h)(0x6AFA46BA)
 I (../Software/inc/cg_cal_guard.h)(0x6AFA4984)

@@ -23,7 +23,7 @@ void ADS1110_READ(ADS1110_STR *ads1110_str)
     data2 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
     ads1110_str->iic_str->ack(ads1110_str->iic_str);
     data3 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
-    ads1110_str->iic_str->ack(ads1110_str->iic_str);
+    ads1110_str->iic_str->nack(ads1110_str->iic_str); /* Final byte. */
     ads1110_str->iic_str->stop(ads1110_str->iic_str);
     
     ads1110_str->ad_data = (data1<<8)|data2;

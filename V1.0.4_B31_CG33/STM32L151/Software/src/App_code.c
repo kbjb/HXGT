@@ -30,7 +30,7 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"V1.0.1",FONT_8X16);
+    OLED_PrintString(40,4,"CG35 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
@@ -523,6 +523,7 @@ void Percision_Menu_Page_Reflash(void)
 void CG_Calibration_Page_Init(void)
 {
     CG_Calibration_Status = 0;
+    Sensor_CG_Stability_Reset();
     CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
 //    CG_Calibration_Tim_Current = 0;
 //    CG_Calibration_Tim_History = 0;
@@ -551,7 +552,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 1:
             OLED_PrintChinese(40,1,"水平处");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Left_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 2:
@@ -565,7 +566,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 3:
             OLED_PrintChinese(24,1,"水平处掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Right_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 4:
@@ -579,7 +580,7 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 5:
             OLED_PrintString(44,1,"180mm",FONT_8X16);
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Left_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 6:
@@ -595,7 +596,7 @@ void CG_Calibration_Page_Reflash(void)
         case 7:
             OLED_PrintString(28,1,"180mm",FONT_8X16);
             OLED_PrintChinese(68,1,"掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Right_Ad);
             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
             break;
         case 8:
@@ -619,9 +620,15 @@ void CG_Calibration_Page_Reflash(void)
             set_PageId(page_calibration_menu);
             break;
     }
-    /* [CG32-05] Error also visible on the four capture prompt pages. */
-    if (CG_Cal_Save_Failed == 3U && CG_Calibration_Status < 8U)
-        OLED_PrintString(28,6,"NO SENSOR",FONT_8X16);
+    if (CG_Calibration_Status < 8U)
+    {
+        int16_t stable_ad;
+        char *status = "SAVED    ";
+        if (!Sensor_Data_Is_Fresh()) status = "NO SENSOR";
+        else if ((CG_Calibration_Status & 1U) == 0U)
+            status = Sensor_Get_Stable_CG(&stable_ad) ? "READY    " : "WAIT     ";
+        OLED_PrintString(28,6,status,FONT_8X16);
+    }
 }
 
 /*************************轨距标定设置界面***************************/

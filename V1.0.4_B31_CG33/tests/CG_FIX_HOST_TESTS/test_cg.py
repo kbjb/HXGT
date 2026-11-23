@@ -79,6 +79,50 @@ uint8_t Get_Driver_Power(uint16_t PowerAd);
 #include <assert.h>
 #include <math.h>
 #include "Algorithm_head.h"
+extern float CG_Value_t;
+
+static void check_zero_edges(int16_t left_zero, int16_t right_zero,
+                             int16_t left_max, int16_t right_max)
+{
+    int32_t ad;
+    int16_t low = left_zero < right_zero ? left_zero : right_zero;
+    int16_t high = left_zero > right_zero ? left_zero : right_zero;
+    float left_step = 180.0f / ((float)low - left_max);
+    float right_step = 180.0f / ((float)right_max - high);
+    float largest_step = fmaxf(left_step, right_step);
+    float previous;
+    CG_Param = (CG_Calibration_Param_Str){left_zero,left_max,right_zero,right_max,23.0f};
+    left_And_Righe_Status = 1;
+    CG_Data_Init();
+    assert(CG_Result_Status == CG_RESULT_OK);
+    assert(fabsf(Get_CG_Value(left_max,23)-180.0f)<0.001f);
+    assert(fabsf(Get_CG_Value(right_max,23)+180.0f)<0.001f);
+    assert(fabsf(Get_CG_Value(low,23))<0.001f);
+    assert(fabsf(Get_CG_Value(high,23))<0.001f);
+    if (low>INT16_MIN) {
+        Get_CG_Value((int16_t)(low-1),23);
+        assert(fabsf(CG_Value_t-left_step)<0.001f);
+    }
+    if (high<INT16_MAX) {
+        Get_CG_Value((int16_t)(high+1),23);
+        assert(fabsf(CG_Value_t+right_step)<0.001f);
+    }
+    Get_CG_Value(INT16_MIN,23);
+    previous=CG_Value_t;
+    for (ad=(int32_t)INT16_MIN+1;ad<=INT16_MAX;++ad) {
+        Get_CG_Value((int16_t)ad,23);
+        assert(CG_Result_Status==CG_RESULT_OK);
+        assert(CG_Value_t<=previous+0.001f);
+        assert(previous-CG_Value_t<=largest_step+0.001f);
+        previous=CG_Value_t;
+    }
+    left_And_Righe_Status=-1;
+    assert(fabsf(Get_CG_Value(left_max,23)+180.0f)<0.001f);
+    assert(fabsf(Get_CG_Value(right_max,23)-180.0f)<0.001f);
+    left_And_Righe_Status=1;
+    assert(fabsf(Get_CG_Value(low,25)-0.10f)<0.001f);
+}
+
 CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
 GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
 int8_t left_And_Righe_Status = 1;
@@ -121,6 +165,17 @@ int main(void) {
   assert(CG_Result_Status == CG_RESULT_OK);
   assert(Get_CG_Value(100,105)==0.0f);
   assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
+
+  /* All 65536 AD codes are swept in normal, reversed, and equal-zero cases.
+   * Include large zero gaps, signed endpoints, and minimum allowed spans. */
+  check_zero_edges(1,50,-12445,12513);
+  check_zero_edges(50,1,-12445,12513);
+  check_zero_edges(50,50,-12445,12513);
+  check_zero_edges(750,-750,-3250,3250);
+  check_zero_edges(-750,750,-4750,4750);
+  check_zero_edges(28000,27000,24000,32000);
+  check_zero_edges(-28000,-27000,-32768,-23000);
+  puts("CG35 zero edges: PASS; full 16-bit sweeps, both zero orders, endpoints, direction, temperature");
   puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference");
   return 0;
 }
@@ -133,9 +188,13 @@ int main(void) {
 #include "Algorithm_head.h"
 #include "cg_cal_guard.h"
 CG_Calibration_Param_Str CG_Param, CG_Param_Temp;
-static uint8_t link_fresh=1;
+static uint8_t link_fresh=1, sample_stable=1;
 uint8_t Sensor_Data_Is_Fresh(void) {return link_fresh;}
 int16_t CG_Ad=0;
+uint8_t Sensor_Get_Stable_CG(int16_t *value) {
+    *value=CG_Ad; return sample_stable;
+}
+void Sensor_CG_Stability_Reset(void) {}
 float Temp=20.5f;
 uint8_t CG_Calibration_Status=0, CG_Calibration_Status_History=8, CG_Cal_Save_Failed=0;
 static int save_calls=0, init_calls=0, beeps=0, allow_save=0;
@@ -149,7 +208,10 @@ void Beep_Ctrl(uint16_t period,uint8_t times) {(void)period; beeps=times;}
 int main(void) {
   link_fresh=0; CG_Ad=100; CG_Calibration_Storage();
   assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==3);
-  link_fresh=1;
+  link_fresh=1; sample_stable=0;
+  CG_Calibration_Storage();
+  assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==4 && save_calls==0);
+  sample_stable=1;
   CG_Ad=100;   CG_Calibration_Storage(); assert(CG_Calibration_Status==1);
   CG_Calibration_Storage(); assert(CG_Calibration_Status==2);
   CG_Ad=150;   CG_Calibration_Storage(); assert(CG_Calibration_Status==3);

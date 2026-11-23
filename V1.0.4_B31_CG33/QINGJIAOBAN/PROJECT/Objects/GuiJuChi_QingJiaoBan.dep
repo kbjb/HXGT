@@ -3,8 +3,8 @@ CompilerVersion: 5060960::V5.06 update 7 (build 960)::.\ARMCC
 F (..\CORE\ST\core_cm3.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\core_cm3.o --omf_browse .\objects\core_cm3.crf --depend .\objects\core_cm3.d)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
 F (..\CORE\ST\startup_stm32f10x_md.s)(0x6AFA46BA)(--cpu Cortex-M3 -g --apcs=interwork --pd "__MICROLIB SETA 1"-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include--pd "__UVISION_VERSION SETA 538" --pd "STM32F10X_MD SETA 1"--list .\listings\startup_stm32f10x_md.lst --xref -o .\objects\startup_stm32f10x_md.o --depend .\objects\startup_stm32f10x_md.d)
-F (..\USER\main.c)(0x6AFA46BC)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\main.o --omf_browse .\objects\main.crf --depend .\objects\main.d)
-I (..\USER\main_head.h)(0x6B03CC99)
+F (..\USER\main.c)(0x6B03E4D1)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\main.o --omf_browse .\objects\main.crf --depend .\objects\main.d)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -43,7 +43,7 @@ I (..\CLASS\INC\usart_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\ads1110_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\iic_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\adc161_head.h)(0x6AFA46BA)
-I (..\USER\cg_angle_filter.h)(0x6B03C981)
+I (..\USER\cg_angle_filter.h)(0x6B03E310)
 I (..\CLASS\INC\lm9507_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\spi_head.h)(0x6AFA46BA)
 F (..\USER\system_stm32f10x.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\system_stm32f10x.o --omf_browse .\objects\system_stm32f10x.crf --depend .\objects\system_stm32f10x.d)
@@ -75,7 +75,7 @@ I (..\MCU\INC\stm32f10x_tim.h)(0x6AFA46BA)
 I (..\MCU\INC\stm32f10x_usart.h)(0x6AFA46BA)
 I (..\MCU\INC\stm32f10x_wwdg.h)(0x6AFA46BA)
 I (..\MCU\INC\misc.h)(0x6AFA46BA)
-F (..\USER\stm32f10x_it.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\stm32f10x_it.o --omf_browse .\objects\stm32f10x_it.crf --depend .\objects\stm32f10x_it.d)
+F (..\USER\stm32f10x_it.c)(0x6B03E310)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\stm32f10x_it.o --omf_browse .\objects\stm32f10x_it.crf --depend .\objects\stm32f10x_it.d)
 I (..\USER\stm32f10x_it.h)(0x6AFA46BA)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
@@ -106,7 +106,7 @@ I (..\MCU\INC\stm32f10x_usart.h)(0x6AFA46BA)
 I (..\MCU\INC\stm32f10x_wwdg.h)(0x6AFA46BA)
 I (..\MCU\INC\misc.h)(0x6AFA46BA)
 I (..\CLASS\INC\usart_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdlib.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
@@ -782,7 +782,7 @@ I (..\MCU\INC\stm32f10x_usart.h)(0x6AFA46BA)
 I (..\MCU\INC\misc.h)(0x6AFA46BA)
 F (..\CLASS\SCR\gpio_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\gpio_code.o --omf_browse .\objects\gpio_code.crf --depend .\objects\gpio_code.d)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -847,15 +847,15 @@ I (..\MCU\INC\stm32f10x_usart.h)(0x6AFA46BA)
 I (..\MCU\INC\stm32f10x_wwdg.h)(0x6AFA46BA)
 I (..\MCU\INC\misc.h)(0x6AFA46BA)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdlib.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
 I (..\CLASS\INC\data_head.h)(0x6AFA46BA)
-F (..\CLASS\SCR\iic_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\iic_code.o --omf_browse .\objects\iic_code.crf --depend .\objects\iic_code.d)
+F (..\CLASS\SCR\iic_code.c)(0x6B03E310)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\iic_code.o --omf_browse .\objects\iic_code.crf --depend .\objects\iic_code.d)
 I (..\CLASS\INC\iic_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -892,7 +892,7 @@ I (..\CLASS\INC\data_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
 F (..\CLASS\SCR\usart_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\usart_code.o --omf_browse .\objects\usart_code.crf --depend .\objects\usart_code.d)
 I (..\CLASS\INC\usart_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -929,7 +929,7 @@ I (..\CLASS\INC\data_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
 F (..\CLASS\SCR\data_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\data_code.o --omf_browse .\objects\data_code.crf --depend .\objects\data_code.d)
 I (..\CLASS\INC\data_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -962,9 +962,9 @@ I (D:\tools\KeilMDK\ARM\ARMCC\include\stdlib.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdio.h)(0x5E8E3CC2)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\math.h)(0x5E8E3CC2)
-F (..\CLASS\SCR\ads1110_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\ads1110_code.o --omf_browse .\objects\ads1110_code.crf --depend .\objects\ads1110_code.d)
+F (..\CLASS\SCR\ads1110_code.c)(0x6B03E310)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\ads1110_code.o --omf_browse .\objects\ads1110_code.crf --depend .\objects\ads1110_code.d)
 I (..\CLASS\INC\ads1110_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -1002,7 +1002,7 @@ I (..\CLASS\INC\iic_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
 F (..\CLASS\SCR\adc161_code.c)(0x6AFA46BC)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\adc161_code.o --omf_browse .\objects\adc161_code.crf --depend .\objects\adc161_code.d)
 I (..\CLASS\INC\adc161_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
@@ -1039,7 +1039,7 @@ I (..\CLASS\INC\data_head.h)(0x6AFA46BA)
 I (..\CLASS\INC\gpio_head.h)(0x6AFA46BA)
 F (..\CLASS\SCR\lm9507_code.c)(0x6AFA46BA)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\CORE\ST -I ..\MCU\INC -I ..\MCU\SRC -I ..\USER -I ..\CLASS\SCR -I ..\CLASS\INC -I ..\FREERTOS\INC -I ..\FREERTOS\SRC -I ..\FREERTOS\PORT\ARM_CM3-ID:\tools\KeilMDK\KeilMDKPage\Keil\STM32F1xx_DFP\2.4.1\Device\Include-D__UVISION_VERSION="538" -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DSTM32F10X_MD-o .\objects\lm9507_code.o --omf_browse .\objects\lm9507_code.crf --depend .\objects\lm9507_code.d)
 I (..\CLASS\INC\lm9507_head.h)(0x6AFA46BA)
-I (..\USER\main_head.h)(0x6B03CC99)
+I (..\USER\main_head.h)(0x6B03E310)
 I (..\USER\stm32f10x.h)(0x6AFA46BA)
 I (..\CORE\ST\core_cm3.h)(0x6AFA46BA)
 I (D:\tools\KeilMDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)

@@ -227,6 +227,49 @@ int main(void) {
     }}
     CHECK(huart1.rx_armed && huart2.rx_armed);
     CHECK(tx_in_isr==0);
+
+    /* CG34 capture uses actual checksum-verified UART frames. */
+    {
+        int16_t captured = 1234;
+        unsigned j;
+        Sensor_CG_Stability_Reset();
+        CHECK(!Sensor_Get_Stable_CG(&captured));
+        fake_tick = 10000U;
+        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
+            u1(15946,100+(int16_t)(j%2),20.0f,f);
+            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+            if (j+1U<CG_CAL_STABLE_SAMPLES) CHECK(!Sensor_Get_Stable_CG(&captured));
+            fake_tick+=100U;
+        }
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==101);
+        CHECK(!Sensor_Get_Stable_CG(NULL));
+        /* An excursion invalidates the window, followed by recovery. */
+        u1(15946,110,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+        CHECK(!Sensor_Get_Stable_CG(&captured));
+        CHECK(CG_Calibration_Range_AD==10);
+        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
+            fake_tick+=100U; u1(15946,-101,20.0f,f);
+            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+        }
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==-101);
+        fake_tick+=CG_CAL_MAX_GAP_MS;
+        CHECK(!Sensor_Get_Stable_CG(&captured));
+        u1(15946,-101,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+        CHECK(!Sensor_Get_Stable_CG(&captured));
+        /* Ten duplicate-time packets cannot count as 900 ms of stability. */
+        Sensor_CG_Stability_Reset();
+        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
+            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+        }
+        CHECK(!Sensor_Get_Stable_CG(&captured));
+        /* Rolling timestamp arithmetic works across the uint32_t wrap. */
+        Sensor_CG_Stability_Reset(); fake_tick=UINT32_MAX-499U;
+        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
+            u1(15946,INT16_MIN,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+            fake_tick+=100U;
+        }
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==INT16_MIN);
+    }
     printf("B2 HOST: PASS %u assertions; UART1 bad=%lu dropped=%lu; UART2 bad=%lu; 50,000 noise bytes; no IRQ TX\n",tests,
         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),
         (unsigned long)UART_Get_Dropped_Frame_Count(UART1_ID),

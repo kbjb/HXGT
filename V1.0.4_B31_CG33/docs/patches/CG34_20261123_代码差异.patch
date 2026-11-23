@@ -1,0 +1,705 @@
+diff --git a/QINGJIAOBAN/CLASS/SCR/ads1110_code.c b/QINGJIAOBAN/CLASS/SCR/ads1110_code.c
+index 4297937..6766494 100644
+--- a/QINGJIAOBAN/CLASS/SCR/ads1110_code.c
++++ b/QINGJIAOBAN/CLASS/SCR/ads1110_code.c
+@@ -23,7 +23,7 @@ void ADS1110_READ(ADS1110_STR *ads1110_str)
+     data2 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
+     ads1110_str->iic_str->ack(ads1110_str->iic_str);
+     data3 = ads1110_str->iic_str->read_byte(ads1110_str->iic_str);
+-    ads1110_str->iic_str->ack(ads1110_str->iic_str);
++    ads1110_str->iic_str->nack(ads1110_str->iic_str); /* Final byte. */
+     ads1110_str->iic_str->stop(ads1110_str->iic_str);
+     
+     ads1110_str->ad_data = (data1<<8)|data2;
+diff --git a/QINGJIAOBAN/CLASS/SCR/iic_code.c b/QINGJIAOBAN/CLASS/SCR/iic_code.c
+index 0b8950e..792c03b 100644
+--- a/QINGJIAOBAN/CLASS/SCR/iic_code.c
++++ b/QINGJIAOBAN/CLASS/SCR/iic_code.c
+@@ -41,8 +41,13 @@
+     if(iic_str->delay!=NULL) iic_str->delay(iic_str);
+     else IIC_DELAY(iic_str->delay_cnt);
+     iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_SET);
++    if(iic_str->delay!=NULL) iic_str->delay(iic_str);
++    else IIC_DELAY(iic_str->delay_cnt);
+     if(iic_str->sda_gpio->read(iic_str->sda_gpio) == Bit_SET)
++    {
++        iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_RESET);
+         return 1;
++    }
+     iic_str->sclk_gpio->write(iic_str->sclk_gpio,Bit_RESET);
+         return 0;
+  }
+diff --git a/QINGJIAOBAN/USER/cg_angle_filter.h b/QINGJIAOBAN/USER/cg_angle_filter.h
+index 7d55b79..68a5e3c 100644
+--- a/QINGJIAOBAN/USER/cg_angle_filter.h
++++ b/QINGJIAOBAN/USER/cg_angle_filter.h
+@@ -3,12 +3,12 @@
+ 
+ #include <stdint.h>
+ 
+-/* [CG32-01] 30-sample trimmed moving average (discard one min and max).
+- * A 10-count output hysteresis is about 0.14 mm at factory CG calibration.
++/* [CG32-01] 40-sample trimmed moving average at 20 ms/sample (discard one min and max).
++ * A 2-count output hysteresis is about 0.029 mm at factory CG calibration.
+  * This is a provisional engineering value, NOT an accuracy qualification.
+  * C99 and armcc5 compatible; no dynamic allocation or float processing. */
+-#define CG_ANGLE_WINDOW_SIZE    30U
+-#define CG_ANGLE_DEADBAND_AD     10L
++#define CG_ANGLE_WINDOW_SIZE    40U
++#define CG_ANGLE_DEADBAND_AD     2L
+ 
+ typedef struct
+ {
+diff --git a/QINGJIAOBAN/USER/main.c b/QINGJIAOBAN/USER/main.c
+index 0dda36b..58209aa 100644
+--- a/QINGJIAOBAN/USER/main.c
++++ b/QINGJIAOBAN/USER/main.c
+@@ -24,7 +24,8 @@ GPIO_STR Beep_gpio      = GPIO_CLASS_CREATE(GPIOA,GPIO_Pin_8,GPIO_Mode_Out_PP,GP
+ GPIO_STR ads1110_scl_str   = GPIO_CLASS_CREATE(ADS1110_SCL_PORT,ADS1110_SCL_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz); 
+ GPIO_STR ads1110_sda_str   = GPIO_CLASS_CREATE(ADS1110_SDA_PORT,ADS1110_SDA_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz);
+ 
+-IIC_STR  ads1110_iic_str   = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,10000,NULL);
++static void ADS1110_IIC_Delay(IIC_STR *iic);
++IIC_STR  ads1110_iic_str = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,0U,ADS1110_IIC_Delay);
+ 
+ ADS1110_STR ads1110_str    = ADS1110_CLASS_STR(&ads1110_iic_str);
+ //ADC161对象创建
+@@ -131,6 +132,9 @@ void idwg_Init(void)
+ #define ADS1110_BUFFER_SIZE 50
+ 
+ 
++volatile uint32_t sensor_tick_ms = 0U;
++volatile uint32_t CG_Sample_Interval_Ms = 0U;
++volatile uint32_t CG_Sample_Overrun_Count = 0U;
+ volatile uint8_t  send_en                           = 0; /* [B2] SysTick -> main */
+ volatile uint16_t send_cnt                           = 0; /* [B2] 1 ms tick */
+ volatile uint32_t uart1_ack_ok_count                  = 0; /* [B2] diagnostic */
+@@ -178,8 +182,32 @@ DataParm AngleParam;
+ * 输    入         : 无
+ * 输    出         : 无
+ *******************************************************************************/
++/* [CG34] TIM2 runs at 1 MHz. The F103 clock setup uses APB1=HCLK/2,
++ * so the APB1 timer clock equals SystemCoreClock (72 MHz). */
++static void Sensor_Timer_Init(void)
++{
++    TIM_TimeBaseInitTypeDef timer;
++    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
++    TIM_TimeBaseStructInit(&timer);
++    timer.TIM_Prescaler = (uint16_t)(SystemCoreClock / 1000000U - 1U);
++    timer.TIM_Period = 0xFFFFU;
++    TIM_TimeBaseInit(TIM2, &timer);
++    TIM_Cmd(TIM2, ENABLE);
++}
++
++static void ADS1110_IIC_Delay(IIC_STR *iic)
++{
++    uint16_t start = (uint16_t)TIM_GetCounter(TIM2);
++    (void)iic;
++    while ((uint16_t)((uint16_t)TIM_GetCounter(TIM2) - start) < 5U) {}
++}
++
+ int main(void)
+ {
++    uint32_t sample_tick = 0U;
++    uint32_t last_sample_tick = 0U;
++    uint32_t auxiliary_tick = 0U;
++    Sensor_Timer_Init();
+     /*配置串口1*/ 
+     usart1_str.str_init(&usart1_str);
+     usart1_str.iqrn = USART1_IQRN; 
+@@ -200,42 +228,41 @@ int main(void)
+     while(1)
+     {
+         
+-        /*
+-            距离传感器
+-        */
+-        ads1110_str.read(&ads1110_str);     //获取ADS1110数据
+-        if((ads1110_str.config>>7) == 0)    //判断数据是否刷新
++        uint32_t now = sensor_tick_ms;
++        uint32_t elapsed = (uint32_t)(now - sample_tick);
++        if (elapsed >= SENSOR_SAMPLE_PERIOD_MS)
++        {
++            sample_tick += SENSOR_SAMPLE_PERIOD_MS;
++            CG_Sample_Interval_Ms = (uint32_t)(now - last_sample_tick);
++            last_sample_tick = now;
++            if (elapsed >= 2U * SENSOR_SAMPLE_PERIOD_MS)
++            {
++                CG_Sample_Overrun_Count++;
++                sample_tick = now; /* Do not fabricate catch-up samples. */
++                CG_AngleFilter_Init(&CG_Angle_Filter);
++            }
++            adc161_str.read(&adc161_str);
++            adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
++            AngleParam.realValue = CG_Angle_Filter.filtered_value;
++            AngleParam.StableValue = CG_Angle_Filter.output_value;
++            AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
++            AngleParam.tempCnt = 0U;
++            AngleParam.tempSumValue = 0;
++            AngleParam.flag = 0U;
++        }
++
++        /* Displacement and temperature run at 10 Hz after due angle samples.
++         * The I2C callback uses 5 us timer delays instead of 10000-spin waits. */
++        if ((uint32_t)(now - auxiliary_tick) >= SENSOR_SEND_PERIOD_MS)
+         {
+-            //ads1110_aver    = umove_average(ads1110_buffer,ADS1110_BUFFER_SIZE,&ads1110_cnt,(ads1110_str.ad_data>0x7FFF?0:ads1110_str.ad_data));//滑动均值滤波  
+-            ads1110_aver    = ads1110_aver*0.5+0.5*(ads1110_str.ad_data>0x7FFF?0:ads1110_str.ad_data);//一阶低通滤波
++            auxiliary_tick = now;
++            ads1110_str.read(&ads1110_str);
++            if ((ads1110_str.config >> 7) == 0)
++                ads1110_aver = ads1110_aver * 0.5f +
++                    0.5f * (ads1110_str.ad_data > 0x7FFF ? 0 : ads1110_str.ad_data);
++            temper = lm9531_str.readTemp(&lm9531_str);
+         }
+-        
+-        /*
+-            倾角传感器
+-        */
+-        //获取ADC161数据
+-        
+-        
+-        adc161_str.read(&adc161_str);
+-        /* [CG32-01] Smooth all signed 16-bit samples, with no 30-AD blind zone.
+-         * Remove the old unstable 5-sample accumulator entirely: it could
+-         * retain an old sum, and its state machine caused unwanted latching.
+-         * Keep AngleParam fields for existing Keil Watch procedures. */
+-        adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
+-        AngleParam.realValue = CG_Angle_Filter.filtered_value;
+-        AngleParam.StableValue = CG_Angle_Filter.output_value;
+-        AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
+-        AngleParam.tempCnt = 0U;
+-        AngleParam.tempSumValue = 0;
+-        AngleParam.flag = 0U;
+ 
+-        
+-        /*
+-            温度传感器
+-        */
+-        //获取LM6509温度数据
+-        temper = lm9531_str.readTemp(&lm9531_str);
+-        
+         if(usart1_str.rx_ok == 1) /* [B1] Only a 7-byte mainboard ACK is expected. */
+         {
+             uint8_t uLen = usart1_str.rx_len;
+diff --git a/QINGJIAOBAN/USER/main_head.h b/QINGJIAOBAN/USER/main_head.h
+index ae2a121..05e5331 100644
+--- a/QINGJIAOBAN/USER/main_head.h
++++ b/QINGJIAOBAN/USER/main_head.h
+@@ -12,8 +12,10 @@
+ 
+ #include "data_head.h"
+ 
+-#define VERSION "1.0.2" /* [B2] UART protocol reliability update. */
+-#define SENSOR_SEND_PERIOD_MS 100U /* [B2] 2Hz sensor reports, independent of ACK. */
++#define VERSION "CG34_TEST"
++#define SENSOR_SAMPLE_PERIOD_MS 20U
++#define SENSOR_SEND_PERIOD_MS   100U /* 10 Hz, independent of ACK. */
++extern volatile uint32_t sensor_tick_ms;
+ 
+ 
+ 
+diff --git a/QINGJIAOBAN/USER/stm32f10x_it.c b/QINGJIAOBAN/USER/stm32f10x_it.c
+index 634a943..465412e 100644
+--- a/QINGJIAOBAN/USER/stm32f10x_it.c
++++ b/QINGJIAOBAN/USER/stm32f10x_it.c
+@@ -135,6 +135,7 @@ void PendSV_Handler(void)
+ 
+ void SysTick_Handler(void)
+ {
++    sensor_tick_ms++; /* [CG34] 1 ms sampling clock; all I/O stays in main. */
+     /* [B2] The ACK parser is fixed-length and does not use idle-time rx_ok.
+      * A periodic scheduler avoids ACK-driven TX/ACK loops. */
+     if (++send_cnt >= SENSOR_SEND_PERIOD_MS)
+diff --git a/STM32L151/Software/inc/agreement_head.h b/STM32L151/Software/inc/agreement_head.h
+index e11f24f..f4250d1 100644
+--- a/STM32L151/Software/inc/agreement_head.h
++++ b/STM32L151/Software/inc/agreement_head.h
+@@ -62,9 +62,20 @@ void Agreement_Ack_For_Uart2(uint8_t uart_id,uint8_t* data, uint16_t length);
+ 
+ void Agreement_Ack_For_Fun(void);
+ /* [B2] Fresh if a correctly checked sensor frame was received in last 1.5s. */
+-#define SENSOR_LINK_TIMEOUT_MS 1500U /* [B2] Three 500ms report periods. */
++#define SENSOR_LINK_TIMEOUT_MS 1500U
+ uint8_t Sensor_Data_Is_Fresh(void);
+ 
++/* [CG34] A calibration point requires 10 fresh 100 ms frames, spanning
++ * at least 900 ms, with at most 3 AD peak-to-peak variation. */
++#define CG_CAL_STABLE_SAMPLES   10U
++#define CG_CAL_STABLE_TIME_MS   900U
++#define CG_CAL_MAX_GAP_MS       250U
++#define CG_CAL_STABLE_RANGE_AD  3L
++void Sensor_CG_Stability_Reset(void);
++uint8_t Sensor_Get_Stable_CG(int16_t *value);
++extern volatile int32_t CG_Calibration_Range_AD;
++
++
+ 
+ 
+ #endif
+diff --git a/STM32L151/Software/inc/param_head.h b/STM32L151/Software/inc/param_head.h
+index f1aa0a9..b9300b0 100644
+--- a/STM32L151/Software/inc/param_head.h
++++ b/STM32L151/Software/inc/param_head.h
+@@ -198,7 +198,7 @@ extern uint8_t Percision_Menu_Select ;
+ extern uint8_t Percision_Menu_Select_History ;
+ extern uint8_t Data_Show_Percision ;
+ 
+-extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor */
++extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor,4=unstable */
+ extern uint8_t CG_Calibration_Status;
+ extern uint8_t CG_Calibration_Status_History;
+ 
+diff --git a/STM32L151/Software/src/App_code.c b/STM32L151/Software/src/App_code.c
+index 4fa86d0..622f291 100644
+--- a/STM32L151/Software/src/App_code.c
++++ b/STM32L151/Software/src/App_code.c
+@@ -30,7 +30,7 @@ void logo_Page_Reflash(void)
+ {
+     uint32_t CurrentTime=HAL_GetTick();
+     
+-    OLED_PrintString(40,4,"V1.0.1",FONT_8X16);
++    OLED_PrintString(40,4,"CG34 TEST",FONT_8X16);
+     if((CurrentTime-ReflashTime)>1500)
+     {
+         set_PageId(page_main);
+@@ -523,6 +523,7 @@ void Percision_Menu_Page_Reflash(void)
+ void CG_Calibration_Page_Init(void)
+ {
+     CG_Calibration_Status = 0;
++    Sensor_CG_Stability_Reset();
+     CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
+ //    CG_Calibration_Tim_Current = 0;
+ //    CG_Calibration_Tim_History = 0;
+@@ -551,7 +552,7 @@ void CG_Calibration_Page_Reflash(void)
+             break;
+         case 1:
+             OLED_PrintChinese(40,1,"水平处");
+-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
++            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Left_Ad);
+             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+             break;
+         case 2:
+@@ -565,7 +566,7 @@ void CG_Calibration_Page_Reflash(void)
+             break;
+         case 3:
+             OLED_PrintChinese(24,1,"水平处掉头");
+-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
++            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Right_Ad);
+             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+             break;
+         case 4:
+@@ -579,7 +580,7 @@ void CG_Calibration_Page_Reflash(void)
+             break;
+         case 5:
+             OLED_PrintString(44,1,"180mm",FONT_8X16);
+-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
++            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Left_Ad);
+             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+             break;
+         case 6:
+@@ -595,7 +596,7 @@ void CG_Calibration_Page_Reflash(void)
+         case 7:
+             OLED_PrintString(28,1,"180mm",FONT_8X16);
+             OLED_PrintChinese(68,1,"掉头");
+-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Ad);
++            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Right_Ad);
+             OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+             break;
+         case 8:
+@@ -619,9 +620,15 @@ void CG_Calibration_Page_Reflash(void)
+             set_PageId(page_calibration_menu);
+             break;
+     }
+-    /* [CG32-05] Error also visible on the four capture prompt pages. */
+-    if (CG_Cal_Save_Failed == 3U && CG_Calibration_Status < 8U)
+-        OLED_PrintString(28,6,"NO SENSOR",FONT_8X16);
++    if (CG_Calibration_Status < 8U)
++    {
++        int16_t stable_ad;
++        char *status = "SAVED    ";
++        if (!Sensor_Data_Is_Fresh()) status = "NO SENSOR";
++        else if ((CG_Calibration_Status & 1U) == 0U)
++            status = Sensor_Get_Stable_CG(&stable_ad) ? "READY    " : "WAIT     ";
++        OLED_PrintString(28,6,status,FONT_8X16);
++    }
+ }
+ 
+ /*************************轨距标定设置界面***************************/
+diff --git a/STM32L151/Software/src/App_key.c b/STM32L151/Software/src/App_key.c
+index 3cef714..e352102 100644
+--- a/STM32L151/Software/src/App_key.c
++++ b/STM32L151/Software/src/App_key.c
+@@ -305,7 +305,8 @@ void Change_Time_For_Set_Time(void)
+ 
+ void CG_Calibration_Storage(void)
+ {
+-    /* [CG32-05] Never commit a value from a dead 500 ms sensor link. */
++    int16_t captured_ad = 0;
++    /* [CG32-05] Require fresh sensor data before capture or commit. */
+     if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
+          CG_Calibration_Status == 4U || CG_Calibration_Status == 6U ||
+          CG_Calibration_Status == 8U) && !Sensor_Data_Is_Fresh())
+@@ -315,7 +316,16 @@ void CG_Calibration_Storage(void)
+         Beep_Ctrl(100,3);
+         return;
+     }
+-    if (CG_Cal_Save_Failed == 3U)
++    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
++         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U) &&
++        !Sensor_Get_Stable_CG(&captured_ad))
++    {
++        CG_Cal_Save_Failed = 4U; /* Still moving or not enough fresh samples. */
++        CG_Calibration_Status_History = 0xFFU;
++        Beep_Ctrl(100,3);
++        return;
++    }
++    if (CG_Cal_Save_Failed == 3U || CG_Cal_Save_Failed == 4U)
+     {
+         CG_Cal_Save_Failed = 0U;
+         CG_Calibration_Status_History = 0xFFU;
+@@ -324,16 +334,16 @@ void CG_Calibration_Storage(void)
+     switch(CG_Calibration_Status)
+     {
+         case 1:
+-            CG_Param_Temp.CG_Zero_Left_Ad  = CG_Ad;
++            CG_Param_Temp.CG_Zero_Left_Ad  = captured_ad;
+             break;
+         case 3:
+-            CG_Param_Temp.CG_Zero_Right_Ad = CG_Ad;
++            CG_Param_Temp.CG_Zero_Right_Ad = captured_ad;
+             break;
+         case 5:
+-            CG_Param_Temp.CG_Max_Left_Ad   = CG_Ad;
++            CG_Param_Temp.CG_Max_Left_Ad   = captured_ad;
+             break;
+         case 7:
+-            CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad;
++            CG_Param_Temp.CG_Max_Right_Ad  = captured_ad;
+             break;
+         case 9:
+             /* [B3] All five CG fields are written together to a new
+@@ -362,6 +372,7 @@ void CG_Calibration_Storage(void)
+             Beep_Ctrl(100,1);
+             break;
+     }
++    if (CG_Calibration_Status < 8U) Sensor_CG_Stability_Reset();
+ }
+ 
+ 
+diff --git a/STM32L151/Software/src/agreement_code.c b/STM32L151/Software/src/agreement_code.c
+index 427114d..4f8bf4e 100644
+--- a/STM32L151/Software/src/agreement_code.c
++++ b/STM32L151/Software/src/agreement_code.c
+@@ -14,6 +14,48 @@ uint8_t Sensor_Data_Is_Fresh(void)
+         (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) < SENSOR_LINK_TIMEOUT_MS);
+ }
+ 
++
++static int16_t CG_Capture_Samples[CG_CAL_STABLE_SAMPLES];
++static uint32_t CG_Capture_Ticks[CG_CAL_STABLE_SAMPLES];
++static uint8_t CG_Capture_Index = 0U;
++static uint8_t CG_Capture_Count = 0U;
++volatile int32_t CG_Calibration_Range_AD = 0;
++
++void Sensor_CG_Stability_Reset(void)
++{
++    CG_Capture_Count = 0U;
++    CG_Capture_Index = 0U;
++    CG_Calibration_Range_AD = 0;
++}
++
++uint8_t Sensor_Get_Stable_CG(int16_t *value)
++{
++    int16_t lowest = INT16_MAX, highest = INT16_MIN;
++    int32_t sum = 0;
++    uint8_t i;
++    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES ||
++        !Sensor_Data_Is_Fresh() ||
++        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
++        return 0U;
++    for (i = 0U; i < CG_CAL_STABLE_SAMPLES; ++i)
++    {
++        int16_t sample = CG_Capture_Samples[i];
++        if (sample < lowest) lowest = sample;
++        if (sample > highest) highest = sample;
++        sum += sample;
++    }
++    CG_Calibration_Range_AD = (int32_t)highest - (int32_t)lowest;
++    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD ||
++        (uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
++            CG_CAL_STABLE_TIME_MS)
++        return 0U;
++    /* Round the mean symmetrically for positive and negative ADC values. */
++    sum += sum >= 0 ? (int32_t)CG_CAL_STABLE_SAMPLES / 2 :
++                    -(int32_t)CG_CAL_STABLE_SAMPLES / 2;
++    *value = (int16_t)(sum / (int32_t)CG_CAL_STABLE_SAMPLES);
++    return 1U;
++}
++
+ int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
+ {
+     UToI uToi_Temp;
+@@ -67,7 +109,17 @@ uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
+     Temp  = Unsigned_Six_To_Float(((uint32_t)data[6] << 24) |
+                                   ((uint32_t)data[7] << 16) |
+                                   ((uint32_t)data[8] << 8) | (uint32_t)data[9]);
+-    Sensor_Last_Valid_Tick = HAL_GetTick();
++    {
++        uint32_t now = HAL_GetTick();
++        if (Sensor_Frame_Seen &&
++            (uint32_t)(now - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
++            Sensor_CG_Stability_Reset();
++        CG_Capture_Samples[CG_Capture_Index] = CG_Ad;
++        CG_Capture_Ticks[CG_Capture_Index] = now;
++        CG_Capture_Index = (uint8_t)((CG_Capture_Index + 1U) % CG_CAL_STABLE_SAMPLES);
++        if (CG_Capture_Count < CG_CAL_STABLE_SAMPLES) CG_Capture_Count++;
++        Sensor_Last_Valid_Tick = now;
++    }
+     Sensor_Frame_Seen = 1;
+     return 3;
+ }
+diff --git a/tests/B2_HOST_TESTS/test_main.c b/tests/B2_HOST_TESTS/test_main.c
+index 47054be..6d44bad 100644
+--- a/tests/B2_HOST_TESTS/test_main.c
++++ b/tests/B2_HOST_TESTS/test_main.c
+@@ -227,6 +227,49 @@ int main(void) {
+     }}
+     CHECK(huart1.rx_armed && huart2.rx_armed);
+     CHECK(tx_in_isr==0);
++
++    /* CG34 capture uses actual checksum-verified UART frames. */
++    {
++        int16_t captured = 1234;
++        unsigned j;
++        Sensor_CG_Stability_Reset();
++        CHECK(!Sensor_Get_Stable_CG(&captured));
++        fake_tick = 10000U;
++        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
++            u1(15946,100+(int16_t)(j%2),20.0f,f);
++            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++            if (j+1U<CG_CAL_STABLE_SAMPLES) CHECK(!Sensor_Get_Stable_CG(&captured));
++            fake_tick+=100U;
++        }
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==101);
++        CHECK(!Sensor_Get_Stable_CG(NULL));
++        /* An excursion invalidates the window, followed by recovery. */
++        u1(15946,110,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++        CHECK(!Sensor_Get_Stable_CG(&captured));
++        CHECK(CG_Calibration_Range_AD==10);
++        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
++            fake_tick+=100U; u1(15946,-101,20.0f,f);
++            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++        }
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==-101);
++        fake_tick+=CG_CAL_MAX_GAP_MS;
++        CHECK(!Sensor_Get_Stable_CG(&captured));
++        u1(15946,-101,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++        CHECK(!Sensor_Get_Stable_CG(&captured));
++        /* Ten duplicate-time packets cannot count as 900 ms of stability. */
++        Sensor_CG_Stability_Reset();
++        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
++            feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++        }
++        CHECK(!Sensor_Get_Stable_CG(&captured));
++        /* Rolling timestamp arithmetic works across the uint32_t wrap. */
++        Sensor_CG_Stability_Reset(); fake_tick=UINT32_MAX-499U;
++        for (j=0; j<CG_CAL_STABLE_SAMPLES; ++j) {
++            u1(15946,INT16_MIN,20.0f,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++            fake_tick+=100U;
++        }
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==INT16_MIN);
++    }
+     printf("B2 HOST: PASS %u assertions; UART1 bad=%lu dropped=%lu; UART2 bad=%lu; 50,000 noise bytes; no IRQ TX\n",tests,
+         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),
+         (unsigned long)UART_Get_Dropped_Frame_Count(UART1_ID),
+diff --git a/tests/B2_HOST_TESTS/test_qing.py b/tests/B2_HOST_TESTS/test_qing.py
+index 9341341..7d36bf2 100644
+--- a/tests/B2_HOST_TESTS/test_qing.py
++++ b/tests/B2_HOST_TESTS/test_qing.py
+@@ -32,7 +32,7 @@ header=r'''
+ #include <assert.h>
+ #include <string.h>
+ #define USART_RX_LEN 64
+-#define SENSOR_SEND_PERIOD_MS 500U
++#define SENSOR_SEND_PERIOD_MS 100U
+ #define RESET 0
+ #define USART_IT_RXNE 1
+ typedef struct USART_TypeDef { int unused; } USART_TypeDef;
+@@ -47,6 +47,7 @@ static uint8_t recv_buf[64];
+ USATR_STR usart1_str = {&fake_dev, recv_buf, 0, 0, 0};
+ volatile uint8_t send_en = 0;
+ volatile uint16_t send_cnt = 0;
++volatile uint32_t sensor_tick_ms = 0;
+ volatile uint32_t uart1_ack_ok_count = 0;
+ volatile uint32_t uart1_ack_error_count = 0;
+ volatile uint32_t uart1_ack_bad_count = 0;
+@@ -58,8 +59,8 @@ static void feed(const uint8_t *data, unsigned len) { unsigned i; for(i=0;i<len;
+ static void make_ack(uint8_t a, uint8_t b, uint8_t *f) { f[0]=0x5A; f[1]=0x05; f[2]=a; f[3]=b; f[4]=getAdd(f,4); f[5]=0x0D; f[6]=0x0A; }
+ int main(void) {
+     uint8_t f[7], bad[7]; unsigned i; uint32_t seed=3333;
+-    for(i=0;i<499;i++) SysTick_Handler();
+-    assert(!send_en && send_cnt==499);
++    for(i=0;i<SENSOR_SEND_PERIOD_MS-1U;i++) SysTick_Handler();
++    assert(!send_en && send_cnt==SENSOR_SEND_PERIOD_MS-1U);
+     SysTick_Handler(); assert(send_en && send_cnt==0);
+     send_en=0;
+     make_ack(0x4F,0x4B,f);
+@@ -73,14 +74,14 @@ int main(void) {
+     make_ack(0x4F,0x4B,f);
+     feed(f,7); consume_ack(); assert(uart1_ack_ok_count==2);
+     /* Valid ACK must not create another send event; only SysTick does. */
+-    for(i=0;i<500;i++) SysTick_Handler();
++    for(i=0;i<SENSOR_SEND_PERIOD_MS;i++) SysTick_Handler();
+     assert(send_en && send_cnt==0); send_en=0;
+     for(i=0;i<120000;i++) {
+        seed=1664525UL*seed+1013904223UL;
+        fake_rx_byte=(uint8_t)(seed>>24);
+        USART1_IQRN(&usart1_str);
+        if(usart1_str.rx_ok) consume_ack();
+-       if((i%211)==0) {for(unsigned j=0;j<500;j++) SysTick_Handler(); send_en=0;}
++       if((i%211)==0) {for(unsigned j=0;j<SENSOR_SEND_PERIOD_MS;j++) SysTick_Handler(); send_en=0;}
+     }
+     /* An interrupted ACK must be recoverable on the next 0x5A start. */
+     usart1_str.rx_i=0;
+@@ -88,7 +89,7 @@ int main(void) {
+     make_ack(0x4F,0x4B,f); feed(f,7);
+     assert(usart1_str.rx_ok && usart1_str.rx_len==7);
+     consume_ack();
+-    printf("B2 QING: PASS; ACK ok=%lu error=%lu, 120,000 noise bytes, 500ms scheduler\n",
++    printf("B2 QING: PASS; ACK ok=%lu error=%lu, 120,000 noise bytes, 100ms scheduler\n",
+            (unsigned long)uart1_ack_ok_count,(unsigned long)uart1_ack_error_count);
+     return 0;
+ }
+diff --git a/tests/CG32_HOST_TESTS/run_cg32_tests.sh b/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+index d23ba4c..79aa801 100644
+--- a/tests/CG32_HOST_TESTS/run_cg32_tests.sh
++++ b/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+@@ -9,6 +9,7 @@ cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-po
+ UBSAN_OPTIONS=halt_on_error=1 "$T/test_filter"
+ cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-pointer -I "$HERE" "$ROOT/QINGJIAOBAN/CLASS/SCR/adc161_code.c" "$HERE/test_adc.c" -o "$T/test_adc"
+ UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
++python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
+ python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
+ sh "$TESTS/B31_HOST_TESTS/run_b31_tests.sh"
+ sh "$TESTS/B2_HOST_TESTS/run_master_tests.sh"
+diff --git a/tests/CG32_HOST_TESTS/test_filter.c b/tests/CG32_HOST_TESTS/test_filter.c
+index d145bbe..94fa10e 100644
+--- a/tests/CG32_HOST_TESTS/test_filter.c
++++ b/tests/CG32_HOST_TESTS/test_filter.c
+@@ -6,8 +6,8 @@ static unsigned checks = 0;
+ #define CHECK(p) do { assert(p); checks++; } while(0)
+ static void stabilize(CG_ANGLE_FILTER *f, int16_t v)
+ {
+-    int i;
+-    for (i=0; i<35; ++i) CG_AngleFilter_Push(f,v);
++    unsigned i;
++    for (i=0; i<CG_ANGLE_WINDOW_SIZE+5; ++i) CG_AngleFilter_Push(f,v);
+ }
+ int main(void)
+ {
+@@ -35,6 +35,15 @@ int main(void)
+         stabilize(&f,(int16_t)v);
+         CHECK(f.output_value<=v && v-f.output_value<CG_ANGLE_DEADBAND_AD);
+     }
++    /* A stationary alternating +/-10 AD disturbance averages to zero. */
++    CG_AngleFilter_Init(&f);
++    for (unsigned i=0; i<200; ++i) {
++        CG_AngleFilter_Push(&f, (int16_t)(1000 + ((i&1) ? 10 : -10)));
++        if (i>=CG_ANGLE_WINDOW_SIZE) CHECK(f.filtered_value==1000);
++    }
++    /* An ideal step fully replaces the 800 ms window in at most 40 samples. */
++    for (unsigned i=0; i<CG_ANGLE_WINDOW_SIZE; ++i) CG_AngleFilter_Push(&f,12000);
++    CHECK(f.filtered_value==12000 && f.output_value==12000);
+     printf("CG32 filter: PASS (%u checks, -32768..32767, %ld AD, spike/return)\n", checks, CG_ANGLE_DEADBAND_AD);
+     return 0;
+ }
+diff --git a/tests/CG_FIX_HOST_TESTS/test_cg.py b/tests/CG_FIX_HOST_TESTS/test_cg.py
+index 7e35278..8f373c8 100644
+--- a/tests/CG_FIX_HOST_TESTS/test_cg.py
++++ b/tests/CG_FIX_HOST_TESTS/test_cg.py
+@@ -133,9 +133,13 @@ int main(void) {
+ #include "Algorithm_head.h"
+ #include "cg_cal_guard.h"
+ CG_Calibration_Param_Str CG_Param, CG_Param_Temp;
+-static uint8_t link_fresh=1;
++static uint8_t link_fresh=1, sample_stable=1;
+ uint8_t Sensor_Data_Is_Fresh(void) {return link_fresh;}
+ int16_t CG_Ad=0;
++uint8_t Sensor_Get_Stable_CG(int16_t *value) {
++    *value=CG_Ad; return sample_stable;
++}
++void Sensor_CG_Stability_Reset(void) {}
+ float Temp=20.5f;
+ uint8_t CG_Calibration_Status=0, CG_Calibration_Status_History=8, CG_Cal_Save_Failed=0;
+ static int save_calls=0, init_calls=0, beeps=0, allow_save=0;
+@@ -149,7 +153,10 @@ void Beep_Ctrl(uint16_t period,uint8_t times) {(void)period; beeps=times;}
+ int main(void) {
+   link_fresh=0; CG_Ad=100; CG_Calibration_Storage();
+   assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==3);
+-  link_fresh=1;
++  link_fresh=1; sample_stable=0;
++  CG_Calibration_Storage();
++  assert(CG_Calibration_Status==0 && CG_Cal_Save_Failed==4 && save_calls==0);
++  sample_stable=1;
+   CG_Ad=100;   CG_Calibration_Storage(); assert(CG_Calibration_Status==1);
+   CG_Calibration_Storage(); assert(CG_Calibration_Status==2);
+   CG_Ad=150;   CG_Calibration_Storage(); assert(CG_Calibration_Status==3);
+diff --git a/tests/CG34_HOST_TESTS/test_sampling.py b/tests/CG34_HOST_TESTS/test_sampling.py
+new file mode 100644
+--- /dev/null
++++ b/tests/CG34_HOST_TESTS/test_sampling.py
+@@ -0,0 +1,53 @@
++from pathlib import Path
++import os
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[2]
++source = (root / 'QINGJIAOBAN/USER/main.c').read_bytes().decode('latin1')
++begin = source.index('        uint32_t now = sensor_tick_ms;')
++end = source.index('        /* Displacement and temperature', begin)
++sample_step = source[begin:end]
++test = r'''
++#include <stdint.h>
++#include <assert.h>
++#include <stdio.h>
++#include "cg_angle_filter.h"
++#define SENSOR_SAMPLE_PERIOD_MS 20U
++static uint32_t sensor_tick_ms, sample_tick, last_sample_tick;
++static uint32_t CG_Sample_Interval_Ms, CG_Sample_Overrun_Count;
++static CG_ANGLE_FILTER CG_Angle_Filter;
++static int16_t adc161_aver;
++static unsigned reads;
++struct FakeADC { int16_t ad_data; void (*read)(struct FakeADC *); };
++static void read_adc(struct FakeADC *adc) { reads++; adc->ad_data=1234; }
++static struct FakeADC adc161_str = {0, read_adc};
++static struct { int16_t realValue, StableValue, PreTempValue;
++    uint8_t tempCnt, flag; int32_t tempSumValue; } AngleParam;
++static void step(void) {
++''' + sample_step + r'''
++}
++int main(void) {
++    unsigned i;
++    CG_AngleFilter_Init(&CG_Angle_Filter);
++    for (i=0;i<20;i++) { sensor_tick_ms=i; step(); }
++    assert(reads==0);
++    for (i=20;i<=1000;i++) { sensor_tick_ms=i; step(); }
++    assert(reads==50 && CG_Angle_Filter.count==40 && adc161_aver==1234);
++    assert(CG_Sample_Overrun_Count==0 && CG_Sample_Interval_Ms==20);
++    sensor_tick_ms=1061; step();
++    assert(reads==51 && CG_Sample_Overrun_Count==1 && CG_Angle_Filter.count==1);
++    step(); assert(reads==51); /* No burst of repeated catch-up samples. */
++    sample_tick=UINT32_MAX-9U; last_sample_tick=sample_tick; sensor_tick_ms=10U;
++    step(); assert(reads==52 && CG_Sample_Interval_Ms==20);
++    assert(AngleParam.tempSumValue==0 && AngleParam.tempCnt==0);
++    puts("CG34 sampling: PASS; 50 Hz, missed-slot recovery, no catch-up burst, tick wrap");
++    return 0;
++}
++'''
++with tempfile.TemporaryDirectory(prefix='cg34_timing_') as temp:
++    c = Path(temp)/'timing.c'
++    exe = Path(temp)/'timing.exe'
++    c.write_text(test, encoding='utf-8')
++    subprocess.run([os.environ.get('CC','cc'),'-std=c99','-O1','-Wall','-Wextra','-Werror','-I',str(root/'QINGJIAOBAN/USER'),str(c),'-o',str(exe)],check=True)
++    subprocess.run([str(exe)],check=True)

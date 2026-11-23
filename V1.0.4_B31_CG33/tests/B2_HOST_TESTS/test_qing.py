@@ -32,7 +32,7 @@ header=r'''
 #include <assert.h>
 #include <string.h>
 #define USART_RX_LEN 64
-#define SENSOR_SEND_PERIOD_MS 500U
+#define SENSOR_SEND_PERIOD_MS 100U
 #define RESET 0
 #define USART_IT_RXNE 1
 typedef struct USART_TypeDef { int unused; } USART_TypeDef;
@@ -47,6 +47,7 @@ static uint8_t recv_buf[64];
 USATR_STR usart1_str = {&fake_dev, recv_buf, 0, 0, 0};
 volatile uint8_t send_en = 0;
 volatile uint16_t send_cnt = 0;
+volatile uint32_t sensor_tick_ms = 0;
 volatile uint32_t uart1_ack_ok_count = 0;
 volatile uint32_t uart1_ack_error_count = 0;
 volatile uint32_t uart1_ack_bad_count = 0;
@@ -58,8 +59,8 @@ static void feed(const uint8_t *data, unsigned len) { unsigned i; for(i=0;i<len;
 static void make_ack(uint8_t a, uint8_t b, uint8_t *f) { f[0]=0x5A; f[1]=0x05; f[2]=a; f[3]=b; f[4]=getAdd(f,4); f[5]=0x0D; f[6]=0x0A; }
 int main(void) {
     uint8_t f[7], bad[7]; unsigned i; uint32_t seed=3333;
-    for(i=0;i<499;i++) SysTick_Handler();
-    assert(!send_en && send_cnt==499);
+    for(i=0;i<SENSOR_SEND_PERIOD_MS-1U;i++) SysTick_Handler();
+    assert(!send_en && send_cnt==SENSOR_SEND_PERIOD_MS-1U);
     SysTick_Handler(); assert(send_en && send_cnt==0);
     send_en=0;
     make_ack(0x4F,0x4B,f);
@@ -73,14 +74,14 @@ int main(void) {
     make_ack(0x4F,0x4B,f);
     feed(f,7); consume_ack(); assert(uart1_ack_ok_count==2);
     /* Valid ACK must not create another send event; only SysTick does. */
-    for(i=0;i<500;i++) SysTick_Handler();
+    for(i=0;i<SENSOR_SEND_PERIOD_MS;i++) SysTick_Handler();
     assert(send_en && send_cnt==0); send_en=0;
     for(i=0;i<120000;i++) {
        seed=1664525UL*seed+1013904223UL;
        fake_rx_byte=(uint8_t)(seed>>24);
        USART1_IQRN(&usart1_str);
        if(usart1_str.rx_ok) consume_ack();
-       if((i%211)==0) {for(unsigned j=0;j<500;j++) SysTick_Handler(); send_en=0;}
+       if((i%211)==0) {for(unsigned j=0;j<SENSOR_SEND_PERIOD_MS;j++) SysTick_Handler(); send_en=0;}
     }
     /* An interrupted ACK must be recoverable on the next 0x5A start. */
     usart1_str.rx_i=0;
@@ -88,7 +89,7 @@ int main(void) {
     make_ack(0x4F,0x4B,f); feed(f,7);
     assert(usart1_str.rx_ok && usart1_str.rx_len==7);
     consume_ack();
-    printf("B2 QING: PASS; ACK ok=%lu error=%lu, 120,000 noise bytes, 500ms scheduler\n",
+    printf("B2 QING: PASS; ACK ok=%lu error=%lu, 120,000 noise bytes, 100ms scheduler\n",
            (unsigned long)uart1_ack_ok_count,(unsigned long)uart1_ack_error_count);
     return 0;
 }
