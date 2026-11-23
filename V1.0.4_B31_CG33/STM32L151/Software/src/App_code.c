@@ -30,7 +30,7 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG35 TEST",FONT_8X16);
+    OLED_PrintString(40,4,"CG37 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
@@ -533,6 +533,8 @@ void CG_Calibration_Page_Init(void)
 char CG_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
 void CG_Calibration_Page_Reflash(void)
 {
+    char live_ad_text[16];
+    uint8_t sensor_fresh = Sensor_Data_Is_Fresh();
     if(CG_Calibration_Status_History!=CG_Calibration_Status)
     {
         OLED_Clear();
@@ -542,7 +544,7 @@ void CG_Calibration_Page_Reflash(void)
     switch(CG_Calibration_Status)
     {
         case 0:
-            OLED_PrintChinese(40,1,"水平处");
+            OLED_PrintChinese(40,0,"水平处");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -551,12 +553,12 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 1:
-            OLED_PrintChinese(40,1,"水平处");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Left_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintChinese(40,0,"水平处");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Zero_Left_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 2:
-            OLED_PrintChinese(24,1,"水平处掉头");
+            OLED_PrintChinese(24,0,"水平处掉头");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -565,12 +567,12 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 3:
-            OLED_PrintChinese(24,1,"水平处掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Right_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintChinese(24,0,"水平处掉头");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Zero_Right_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 4:
-            OLED_PrintString(44,1,"180mm",FONT_8X16);
+            OLED_PrintString(44,0,"180mm",FONT_8X16);
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -579,13 +581,13 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 5:
-            OLED_PrintString(44,1,"180mm",FONT_8X16);
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Left_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintString(44,0,"180mm",FONT_8X16);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Max_Left_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 6:
-            OLED_PrintString(28,1,"180mm",FONT_8X16);
-            OLED_PrintChinese(68,1,"掉头");
+            OLED_PrintString(28,0,"180mm",FONT_8X16);
+            OLED_PrintChinese(68,0,"掉头");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -594,14 +596,14 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 7:
-            OLED_PrintString(28,1,"180mm",FONT_8X16);
-            OLED_PrintChinese(68,1,"掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Right_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintString(28,0,"180mm",FONT_8X16);
+            OLED_PrintChinese(68,0,"掉头");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Max_Right_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 8:
             /* [CGFIX-03] Collected four AD points, NOT saved yet. */
-            OLED_PrintChinese(32,1,"超高标定");
+            OLED_PrintChinese(32,0,"超高标定");
             if(CG_Cal_Save_Failed == 3U)
                 OLED_PrintString(28,4,"NO SENSOR",FONT_8X16);
             else if(CG_Cal_Save_Failed == 2U)
@@ -613,20 +615,45 @@ void CG_Calibration_Page_Reflash(void)
             break;
         case 9:
             /* Only reached after EEPROM CRC/readback commit succeeds. */
-            OLED_PrintChinese(32,1,"超高标定");
+            OLED_PrintChinese(32,0,"超高标定");
             OLED_PrintChinese(48,4,"成功");
             break;
         case 10:
             set_PageId(page_calibration_menu);
             break;
     }
+    /* [CG37] Live received AD stays visible before and after capture.
+     * Six signed digits fully overwrite previous values, including -32768. */
+    if (CG_Calibration_Status < 10U)
+    {
+        if (sensor_fresh)
+            snprintf(live_ad_text,sizeof(live_ad_text),"AD:%+06d",CG_Ad);
+        else
+            snprintf(live_ad_text,sizeof(live_ad_text),"AD:------");
+        OLED_PrintString(28,2,live_ad_text,FONT_8X16);
+    }
     if (CG_Calibration_Status < 8U)
     {
         int16_t stable_ad;
         char *status = "SAVED    ";
-        if (!Sensor_Data_Is_Fresh()) status = "NO SENSOR";
+        if ((CG_Calibration_Status & 1U) != 0U)
+            OLED_PrintString(20,4,"SAVE:",FONT_8X16);
+        if (!sensor_fresh) status = "NO SENSOR";
         else if ((CG_Calibration_Status & 1U) == 0U)
-            status = Sensor_Get_Stable_CG(&stable_ad) ? "READY    " : "WAIT     ";
+        {
+            if (Sensor_Get_Stable_CG(&stable_ad)) status = "READY    ";
+            else
+            {
+                switch (CG_Calibration_Wait_State)
+                {
+                    case CG_CAL_WAIT_LINK:  status = "WAIT LINK"; break;
+                    case CG_CAL_WAIT_TIME:  status = "WAIT TIME"; break;
+                    case CG_CAL_WAIT_NOISE: status = "WAIT AD  "; break;
+                    case CG_CAL_WAIT_DRIFT: status = "WAIT DRFT"; break;
+                    default:               status = "WAIT DATA"; break;
+                }
+            }
+        }
         OLED_PrintString(28,6,status,FONT_8X16);
     }
 }

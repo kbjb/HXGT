@@ -65,15 +65,28 @@ void Agreement_Ack_For_Fun(void);
 #define SENSOR_LINK_TIMEOUT_MS 1500U
 uint8_t Sensor_Data_Is_Fresh(void);
 
-/* [CG34] A calibration point requires 10 fresh 100 ms frames, spanning
- * at least 900 ms, with at most 3 AD peak-to-peak variation. */
-#define CG_CAL_STABLE_SAMPLES   10U
-#define CG_CAL_STABLE_TIME_MS   900U
-#define CG_CAL_MAX_GAP_MS       250U
-#define CG_CAL_STABLE_RANGE_AD  3L
+/* [CG36] Ten nominal 100 ms reports. Allow timestamp jitter around the
+ * nominal 900 ms span; reject movement by range AND half-window mean drift. */
+#define CG_CAL_STABLE_SAMPLES      10U
+#define CG_CAL_STABLE_TIME_MS      800U
+#define CG_CAL_MAX_GAP_MS          250U
+#define CG_CAL_STABLE_RANGE_AD     6L
+#define CG_CAL_MAX_MEAN_DRIFT_AD   2L
+typedef enum
+{
+    CG_CAL_CAPTURE_READY = 0,
+    CG_CAL_WAIT_DATA,
+    CG_CAL_WAIT_LINK,
+    CG_CAL_WAIT_TIME,
+    CG_CAL_WAIT_NOISE,
+    CG_CAL_WAIT_DRIFT
+} CG_CAL_WAIT_STATE;
 void Sensor_CG_Stability_Reset(void);
 uint8_t Sensor_Get_Stable_CG(int16_t *value);
 extern volatile int32_t CG_Calibration_Range_AD;
+/* Ceil of the absolute difference between the two five-frame means. */
+extern volatile int32_t CG_Calibration_Trend_AD;
+extern volatile CG_CAL_WAIT_STATE CG_Calibration_Wait_State;
 
 
 

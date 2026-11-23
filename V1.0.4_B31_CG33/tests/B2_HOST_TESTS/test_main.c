@@ -107,6 +107,19 @@ static unsigned u2(uint8_t cmd, const uint8_t *data, unsigned dlen, uint8_t *out
     return dlen+7;
 }
 #define CHECK(pred) do { assert(pred); tests++; } while(0)
+static void capture_window(const int16_t *samples, uint32_t period_ms)
+{
+    uint8_t frame[13];
+    unsigned i;
+    Sensor_CG_Stability_Reset();
+    for (i=0;i<CG_CAL_STABLE_SAMPLES;++i) {
+        fake_tick+=period_ms;
+        u1(15946,samples[i],20.0f,frame);
+        feed(&huart1,frame,13);
+        UART_Process_Received(UART1_ID);
+    }
+}
+
 int main(void) {
     uint8_t f[256], g[256], dat[256];
     unsigned len; size_t before;
@@ -269,6 +282,37 @@ int main(void) {
             fake_tick+=100U;
         }
         CHECK(Sensor_Get_Stable_CG(&captured) && captured==INT16_MIN);
+    }
+    /* CG36 distinguishes bounded noise, drift, timestamps, and link gaps. */
+    {
+        int16_t captured;
+        const int16_t quiet[10]={777,777,777,777,777,777,777,777,777,777};
+        const int16_t noise6[10]={-103,-97,-103,-97,-103,-97,-103,-97,-103,-97};
+        const int16_t noise7[10]={100,107,100,107,100,107,100,107,100,107};
+        const int16_t moving[10]={0,0,1,1,2,3,3,4,4,5};
+        const int16_t drift2[10]={100,100,100,100,100,102,102,102,102,102};
+        const int16_t drift22[10]={100,100,100,100,100,102,102,102,102,103};
+        Sensor_CG_Stability_Reset();
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DATA);
+        capture_window(quiet,99U); /* 891 ms total, previously rejected. */
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==777);
+        CHECK(CG_Calibration_Wait_State==CG_CAL_CAPTURE_READY);
+        capture_window(noise6,100U);
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==-100);
+        CHECK(CG_Calibration_Range_AD==6 && CG_Calibration_Trend_AD==2);
+        capture_window(noise7,100U);
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_NOISE);
+        capture_window(moving,100U);
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DRIFT);
+        CHECK(CG_Calibration_Trend_AD==3);
+        capture_window(drift2,100U);
+        CHECK(Sensor_Get_Stable_CG(&captured) && captured==101);
+        capture_window(drift22,100U);
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DRIFT);
+        capture_window(quiet,70U);
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_TIME);
+        capture_window(quiet,100U); fake_tick+=CG_CAL_MAX_GAP_MS;
+        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_LINK);
     }
     printf("B2 HOST: PASS %u assertions; UART1 bad=%lu dropped=%lu; UART2 bad=%lu; 50,000 noise bytes; no IRQ TX\n",tests,
         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),

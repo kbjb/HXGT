@@ -1,0 +1,202 @@
+diff --git a/STM32L151/Software/inc/agreement_head.h b/STM32L151/Software/inc/agreement_head.h
+--- a/STM32L151/Software/inc/agreement_head.h
++++ b/STM32L151/Software/inc/agreement_head.h
+@@ -65,15 +65,28 @@
+ #define SENSOR_LINK_TIMEOUT_MS 1500U
+ uint8_t Sensor_Data_Is_Fresh(void);
+ 
+-/* [CG34] A calibration point requires 10 fresh 100 ms frames, spanning
+- * at least 900 ms, with at most 3 AD peak-to-peak variation. */
+-#define CG_CAL_STABLE_SAMPLES   10U
+-#define CG_CAL_STABLE_TIME_MS   900U
+-#define CG_CAL_MAX_GAP_MS       250U
+-#define CG_CAL_STABLE_RANGE_AD  3L
++/* [CG36] Ten nominal 100 ms reports. Allow timestamp jitter around the
++ * nominal 900 ms span; reject movement by range AND half-window mean drift. */
++#define CG_CAL_STABLE_SAMPLES      10U
++#define CG_CAL_STABLE_TIME_MS      800U
++#define CG_CAL_MAX_GAP_MS          250U
++#define CG_CAL_STABLE_RANGE_AD     6L
++#define CG_CAL_MAX_MEAN_DRIFT_AD   2L
++typedef enum
++{
++    CG_CAL_CAPTURE_READY = 0,
++    CG_CAL_WAIT_DATA,
++    CG_CAL_WAIT_LINK,
++    CG_CAL_WAIT_TIME,
++    CG_CAL_WAIT_NOISE,
++    CG_CAL_WAIT_DRIFT
++} CG_CAL_WAIT_STATE;
+ void Sensor_CG_Stability_Reset(void);
+ uint8_t Sensor_Get_Stable_CG(int16_t *value);
+ extern volatile int32_t CG_Calibration_Range_AD;
++/* Ceil of the absolute difference between the two five-frame means. */
++extern volatile int32_t CG_Calibration_Trend_AD;
++extern volatile CG_CAL_WAIT_STATE CG_Calibration_Wait_State;
+ 
+ 
+ 
+diff --git a/STM32L151/Software/src/agreement_code.c b/STM32L151/Software/src/agreement_code.c
+--- a/STM32L151/Software/src/agreement_code.c
++++ b/STM32L151/Software/src/agreement_code.c
+@@ -20,39 +20,56 @@
+ static uint8_t CG_Capture_Index = 0U;
+ static uint8_t CG_Capture_Count = 0U;
+ volatile int32_t CG_Calibration_Range_AD = 0;
++volatile int32_t CG_Calibration_Trend_AD = 0;
++volatile CG_CAL_WAIT_STATE CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+ 
+ void Sensor_CG_Stability_Reset(void)
+ {
+     CG_Capture_Count = 0U;
+     CG_Capture_Index = 0U;
+     CG_Calibration_Range_AD = 0;
++    CG_Calibration_Trend_AD = 0;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+ }
+ 
+ uint8_t Sensor_Get_Stable_CG(int16_t *value)
+ {
+     int16_t lowest = INT16_MAX, highest = INT16_MIN;
+-    int32_t sum = 0;
++    int32_t sum = 0, early_sum = 0, late_sum = 0, drift_sum;
+     uint8_t i;
+-    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES ||
+-        !Sensor_Data_Is_Fresh() ||
++    const uint8_t half = CG_CAL_STABLE_SAMPLES / 2U;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
++    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES) return 0U;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_LINK;
++    if (!Sensor_Data_Is_Fresh() ||
+         (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
+         return 0U;
++    /* CG_Capture_Index points at the oldest sample in a full ring. */
+     for (i = 0U; i < CG_CAL_STABLE_SAMPLES; ++i)
+     {
+-        int16_t sample = CG_Capture_Samples[i];
++        int16_t sample = CG_Capture_Samples[(CG_Capture_Index + i) % CG_CAL_STABLE_SAMPLES];
+         if (sample < lowest) lowest = sample;
+         if (sample > highest) highest = sample;
+         sum += sample;
++        if (i < half) early_sum += sample;
++        else late_sum += sample;
+     }
+     CG_Calibration_Range_AD = (int32_t)highest - (int32_t)lowest;
+-    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD ||
+-        (uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
+-            CG_CAL_STABLE_TIME_MS)
+-        return 0U;
+-    /* Round the mean symmetrically for positive and negative ADC values. */
++    drift_sum = late_sum - early_sum;
++    if (drift_sum < 0) drift_sum = -drift_sum;
++    CG_Calibration_Trend_AD = (drift_sum + half - 1U) / half;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_TIME;
++    if ((uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
++        CG_CAL_STABLE_TIME_MS) return 0U;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_NOISE;
++    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD) return 0U;
++    CG_Calibration_Wait_State = CG_CAL_WAIT_DRIFT;
++    /* Compare sums before division so 2.2 AD cannot truncate to 2 AD. */
++    if (drift_sum > CG_CAL_MAX_MEAN_DRIFT_AD * half) return 0U;
+     sum += sum >= 0 ? (int32_t)CG_CAL_STABLE_SAMPLES / 2 :
+                     -(int32_t)CG_CAL_STABLE_SAMPLES / 2;
+     *value = (int16_t)(sum / (int32_t)CG_CAL_STABLE_SAMPLES);
++    CG_Calibration_Wait_State = CG_CAL_CAPTURE_READY;
+     return 1U;
+ }
+ 
+diff --git a/STM32L151/Software/src/App_code.c b/STM32L151/Software/src/App_code.c
+--- a/STM32L151/Software/src/App_code.c
++++ b/STM32L151/Software/src/App_code.c
+@@ -30,7 +30,7 @@
+ {
+     uint32_t CurrentTime=HAL_GetTick();
+     
+-    OLED_PrintString(40,4,"CG35 TEST",FONT_8X16);
++    OLED_PrintString(40,4,"CG36 TEST",FONT_8X16);
+     if((CurrentTime-ReflashTime)>1500)
+     {
+         set_PageId(page_main);
+@@ -626,7 +626,20 @@
+         char *status = "SAVED    ";
+         if (!Sensor_Data_Is_Fresh()) status = "NO SENSOR";
+         else if ((CG_Calibration_Status & 1U) == 0U)
+-            status = Sensor_Get_Stable_CG(&stable_ad) ? "READY    " : "WAIT     ";
++        {
++            if (Sensor_Get_Stable_CG(&stable_ad)) status = "READY    ";
++            else
++            {
++                switch (CG_Calibration_Wait_State)
++                {
++                    case CG_CAL_WAIT_LINK:  status = "WAIT LINK"; break;
++                    case CG_CAL_WAIT_TIME:  status = "WAIT TIME"; break;
++                    case CG_CAL_WAIT_NOISE: status = "WAIT AD  "; break;
++                    case CG_CAL_WAIT_DRIFT: status = "WAIT DRFT"; break;
++                    default:               status = "WAIT DATA"; break;
++                }
++            }
++        }
+         OLED_PrintString(28,6,status,FONT_8X16);
+     }
+ }
+diff --git a/tests/B2_HOST_TESTS/test_main.c b/tests/B2_HOST_TESTS/test_main.c
+--- a/tests/B2_HOST_TESTS/test_main.c
++++ b/tests/B2_HOST_TESTS/test_main.c
+@@ -107,6 +107,19 @@
+     return dlen+7;
+ }
+ #define CHECK(pred) do { assert(pred); tests++; } while(0)
++static void capture_window(const int16_t *samples, uint32_t period_ms)
++{
++    uint8_t frame[13];
++    unsigned i;
++    Sensor_CG_Stability_Reset();
++    for (i=0;i<CG_CAL_STABLE_SAMPLES;++i) {
++        fake_tick+=period_ms;
++        u1(15946,samples[i],20.0f,frame);
++        feed(&huart1,frame,13);
++        UART_Process_Received(UART1_ID);
++    }
++}
++
+ int main(void) {
+     uint8_t f[256], g[256], dat[256];
+     unsigned len; size_t before;
+@@ -270,6 +283,37 @@
+         }
+         CHECK(Sensor_Get_Stable_CG(&captured) && captured==INT16_MIN);
+     }
++    /* CG36 distinguishes bounded noise, drift, timestamps, and link gaps. */
++    {
++        int16_t captured;
++        const int16_t quiet[10]={777,777,777,777,777,777,777,777,777,777};
++        const int16_t noise6[10]={-103,-97,-103,-97,-103,-97,-103,-97,-103,-97};
++        const int16_t noise7[10]={100,107,100,107,100,107,100,107,100,107};
++        const int16_t moving[10]={0,0,1,1,2,3,3,4,4,5};
++        const int16_t drift2[10]={100,100,100,100,100,102,102,102,102,102};
++        const int16_t drift22[10]={100,100,100,100,100,102,102,102,102,103};
++        Sensor_CG_Stability_Reset();
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DATA);
++        capture_window(quiet,99U); /* 891 ms total, previously rejected. */
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==777);
++        CHECK(CG_Calibration_Wait_State==CG_CAL_CAPTURE_READY);
++        capture_window(noise6,100U);
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==-100);
++        CHECK(CG_Calibration_Range_AD==6 && CG_Calibration_Trend_AD==2);
++        capture_window(noise7,100U);
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_NOISE);
++        capture_window(moving,100U);
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DRIFT);
++        CHECK(CG_Calibration_Trend_AD==3);
++        capture_window(drift2,100U);
++        CHECK(Sensor_Get_Stable_CG(&captured) && captured==101);
++        capture_window(drift22,100U);
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_DRIFT);
++        capture_window(quiet,70U);
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_TIME);
++        capture_window(quiet,100U); fake_tick+=CG_CAL_MAX_GAP_MS;
++        CHECK(!Sensor_Get_Stable_CG(&captured) && CG_Calibration_Wait_State==CG_CAL_WAIT_LINK);
++    }
+     printf("B2 HOST: PASS %u assertions; UART1 bad=%lu dropped=%lu; UART2 bad=%lu; 50,000 noise bytes; no IRQ TX\n",tests,
+         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),
+         (unsigned long)UART_Get_Dropped_Frame_Count(UART1_ID),

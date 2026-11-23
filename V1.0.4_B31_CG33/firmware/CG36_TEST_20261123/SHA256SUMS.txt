@@ -1,0 +1,1 @@
+cbebaf73c9cde3b2b5967efbdd0da87c9471e69e22eebd3d6eee7a891fe7061f  STM32L151_CG36_TEST.hex

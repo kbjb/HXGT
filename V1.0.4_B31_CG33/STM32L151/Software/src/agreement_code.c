@@ -20,39 +20,56 @@ static uint32_t CG_Capture_Ticks[CG_CAL_STABLE_SAMPLES];
 static uint8_t CG_Capture_Index = 0U;
 static uint8_t CG_Capture_Count = 0U;
 volatile int32_t CG_Calibration_Range_AD = 0;
+volatile int32_t CG_Calibration_Trend_AD = 0;
+volatile CG_CAL_WAIT_STATE CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
 
 void Sensor_CG_Stability_Reset(void)
 {
     CG_Capture_Count = 0U;
     CG_Capture_Index = 0U;
     CG_Calibration_Range_AD = 0;
+    CG_Calibration_Trend_AD = 0;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
 }
 
 uint8_t Sensor_Get_Stable_CG(int16_t *value)
 {
     int16_t lowest = INT16_MAX, highest = INT16_MIN;
-    int32_t sum = 0;
+    int32_t sum = 0, early_sum = 0, late_sum = 0, drift_sum;
     uint8_t i;
-    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES ||
-        !Sensor_Data_Is_Fresh() ||
+    const uint8_t half = CG_CAL_STABLE_SAMPLES / 2U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_LINK;
+    if (!Sensor_Data_Is_Fresh() ||
         (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
         return 0U;
+    /* CG_Capture_Index points at the oldest sample in a full ring. */
     for (i = 0U; i < CG_CAL_STABLE_SAMPLES; ++i)
     {
-        int16_t sample = CG_Capture_Samples[i];
+        int16_t sample = CG_Capture_Samples[(CG_Capture_Index + i) % CG_CAL_STABLE_SAMPLES];
         if (sample < lowest) lowest = sample;
         if (sample > highest) highest = sample;
         sum += sample;
+        if (i < half) early_sum += sample;
+        else late_sum += sample;
     }
     CG_Calibration_Range_AD = (int32_t)highest - (int32_t)lowest;
-    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD ||
-        (uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
-            CG_CAL_STABLE_TIME_MS)
-        return 0U;
-    /* Round the mean symmetrically for positive and negative ADC values. */
+    drift_sum = late_sum - early_sum;
+    if (drift_sum < 0) drift_sum = -drift_sum;
+    CG_Calibration_Trend_AD = (drift_sum + half - 1U) / half;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_TIME;
+    if ((uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
+        CG_CAL_STABLE_TIME_MS) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_NOISE;
+    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DRIFT;
+    /* Compare sums before division so 2.2 AD cannot truncate to 2 AD. */
+    if (drift_sum > CG_CAL_MAX_MEAN_DRIFT_AD * half) return 0U;
     sum += sum >= 0 ? (int32_t)CG_CAL_STABLE_SAMPLES / 2 :
                     -(int32_t)CG_CAL_STABLE_SAMPLES / 2;
     *value = (int16_t)(sum / (int32_t)CG_CAL_STABLE_SAMPLES);
+    CG_Calibration_Wait_State = CG_CAL_CAPTURE_READY;
     return 1U;
 }
 

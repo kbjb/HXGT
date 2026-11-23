@@ -242,7 +242,90 @@ int main(void) {
   return 0;
 }
 ''')
-    for source, out, more in [('test_math.c','test_math',['Algorithm_code.c','-lm']), ('test_key.c','test_key',[])]:
+
+    display_func = extract_c_function(display, 'void CG_Calibration_Page_Reflash(void)')
+    capture_enum = get('STM32L151/Software/inc/agreement_head.h').replace('\r\n','\n')
+    enum_start = capture_enum.index('typedef enum\n{\n    CG_CAL_CAPTURE_READY')
+    enum_end = capture_enum.index('} CG_CAL_WAIT_STATE;',enum_start)+len('} CG_CAL_WAIT_STATE;')
+    capture_enum = capture_enum[enum_start:enum_end]
+    (d / 'test_display.c').write_text(r"""
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <assert.h>
+#include "Algorithm_head.h"
+#define FONT_8X16 1
+#define page_calibration_menu 1
+CG_Calibration_Param_Str CG_Param_Temp={123,-12345,-456,23456,20};
+uint8_t CG_Calibration_Status, CG_Calibration_Status_History, CG_Cal_Save_Failed;
+int16_t CG_Ad;
+char CG_buffer[8];
+static uint8_t fresh=1, ready=0;
+static char live_text[16], saved_text[16], state_text[16];
+static unsigned save_label;
+static uint8_t occupied[8][128];
+uint8_t Sensor_Data_Is_Fresh(void) { return fresh; }
+uint8_t Sensor_Get_Stable_CG(int16_t *ad) { *ad=0; return ready; }
+void set_PageId(unsigned page) { (void)page; }
+static void rect(unsigned x,unsigned y,unsigned width,unsigned pages) {
+    unsigned xx,yy;
+    assert(x+width<=128 && y+pages<=8);
+    for(yy=y;yy<y+pages;++yy) for(xx=x;xx<x+width;++xx) {
+        assert(!occupied[yy][xx]); occupied[yy][xx]=1;
+    }
+}
+void OLED_Clear(void) {
+    memset(occupied,0,sizeof(occupied));
+    live_text[0]=saved_text[0]=state_text[0]=0; save_label=0;
+}
+void OLED_PrintString(uint8_t x,uint8_t y,char *text,uint8_t font) {
+    assert(font==FONT_8X16);
+    rect(x,y,8U*(unsigned)strlen(text),2);
+    if(y==2) { assert(x==28); snprintf(live_text,sizeof(live_text),"%s",text); }
+    if(y==4 && x==60) snprintf(saved_text,sizeof(saved_text),"%s",text);
+    if(y==4 && x==20 && strcmp(text,"SAVE:")==0) save_label=1;
+    if(y==6) snprintf(state_text,sizeof(state_text),"%s",text);
+}
+void OLED_PrintChinese(uint8_t x,uint8_t y,char *text) {
+    unsigned chars=0;
+    const unsigned char *p=(const unsigned char *)text;
+    while(*p) { if((*p&0xC0)!=0x80) chars++; p++; }
+    rect(x,y,16U*chars,2);
+}
+""" + capture_enum + '\nCG_CAL_WAIT_STATE CG_Calibration_Wait_State=CG_CAL_WAIT_NOISE;\n' + display_func + r"""
+int main(void) {
+    const int16_t values[]={INT16_MIN,-1,0,1,INT16_MAX};
+    const int16_t saved[]={123,-456,-12345,23456};
+    const char *wait_text[]={"WAIT DATA","WAIT LINK","WAIT TIME","WAIT AD  ","WAIT DRFT"};
+    unsigned page,i;
+    char expected[16];
+    for(page=0;page<10;++page) for(i=0;i<sizeof(values)/sizeof(values[0]);++i) {
+        CG_Calibration_Status=(uint8_t)page; CG_Calibration_Status_History=0xFF;
+        CG_Cal_Save_Failed=0; CG_Ad=values[i]; fresh=1; ready=0;
+        CG_Calibration_Page_Reflash();
+        snprintf(expected,sizeof(expected),"AD:%+06d",values[i]);
+        assert(strcmp(live_text,expected)==0);
+        if(page<8 && (page&1)) {
+            snprintf(expected,sizeof(expected),"%+06d",saved[page/2]);
+            assert(save_label && strcmp(saved_text,expected)==0);
+        }
+    }
+    for(i=1;i<=5;++i) {
+        CG_Calibration_Status=0; CG_Calibration_Status_History=0xFF;
+        CG_Calibration_Wait_State=(CG_CAL_WAIT_STATE)i;
+        CG_Calibration_Page_Reflash();
+        assert(strcmp(state_text,wait_text[i-1])==0);
+    }
+    ready=1; CG_Calibration_Status_History=0xFF; CG_Calibration_Page_Reflash();
+    assert(strcmp(state_text,"READY    ")==0);
+    fresh=0; CG_Calibration_Status_History=0xFF; CG_Calibration_Page_Reflash();
+    assert(strcmp(live_text,"AD:------")==0 && strcmp(state_text,"NO SENSOR")==0);
+    puts("CG37 calibration display: PASS; live AD on 10 states, full signed range, saved means, wait reasons, 128x64 nonoverlap");
+    return 0;
+}
+""",encoding='utf-8')
+
+    for source, out, more in [('test_math.c','test_math',['Algorithm_code.c','-lm']), ('test_key.c','test_key',[]), ('test_display.c','test_display',[])]:
         cmd=['cc','-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
              '-fsanitize=undefined','-fno-omit-frame-pointer','-I',str(d),str(d/source)]
         for v in more:
