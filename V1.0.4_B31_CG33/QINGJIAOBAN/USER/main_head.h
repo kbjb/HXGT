@@ -13,17 +13,17 @@
 #include "data_head.h"
 
 #define VERSION "1.0.2" /* [B2] UART protocol reliability update. */
-#define SENSOR_SEND_PERIOD_MS 500U /* [B2] 2Hz sensor reports, independent of ACK. */
+#define SENSOR_SEND_PERIOD_MS 100U /* [B2] 2Hz sensor reports, independent of ACK. */
 
 
 
 
 
-//хннЯсеох╪╤
+//О©╫О©╫О©╫О©╫О©╫О©╫О©╫х╪О©╫
 #define START_TASK_PRIO     1
-//хннЯ╤яу╩╢Сп║
+//О©╫О©╫О©╫О©╫О©╫у╩О©╫О©╫п║
 #define START_STK_SIZE      128
-//хннЯ╨╞йЩ
+//О©╫О©╫О©╫О©╫О©╫О©╫
 void start_task(void *pvParameters);
 
 

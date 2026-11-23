@@ -3567,36 +3567,36 @@ Image component sizes
 
       Code (inc. data)   RO Data    RW Data    ZI Data      Debug   Object Name
 
-       150         12          0          0          0       3366   adc_code.o
-      1164         70          0         28          0      10969   agreement_code.o
-       952        126          0         36         20       5792   algorithm_code.o
-      4704       1278          0        116        112      19308   app_code.o
-      2148         90          0         16          0      23365   app_eep.o
-      1900        390          0        394          0      22811   app_key.o
-       320         16          0          0          0       5529   at21c512_code.o
-       716         62          0         52          0      10481   key_code.o
-      1248        202          0         16        552     373040   main.o
-      1206         88         19          1       1024      11569   oled_code.o
-        52          4       3867         80         16       2407   oledfont.o
-        24         12          0        149         24       6568   param_code.o
-       402          0          0          0          0       3703   pcf8563_code.o
-        36          8        244          0       1024        964   startup_stm32l151xba.o
-       162         24          0         12          0       4173   stm32l1xx_hal.o
-      1280         40          0          0          0       7451   stm32l1xx_hal_adc.o
-       198         14          0          0          0      30887   stm32l1xx_hal_cortex.o
-       592          8          0          0          0       5821   stm32l1xx_hal_dma.o
-       444         34          0          0          0       2971   stm32l1xx_hal_gpio.o
-      3840         96          0          0          0      19673   stm32l1xx_hal_i2c.o
-       684         70          0          0          0       4290   stm32l1xx_hal_msp.o
-      1740        108          0          0          0       6696   stm32l1xx_hal_rcc.o
-      1170         28          0          0          0       8694   stm32l1xx_hal_spi.o
-      1806          8          0          0          0      11409   stm32l1xx_hal_uart.o
-       104         18          0          0          0       5897   stm32l1xx_it.o
-         2          0         33          4          0       1311   system_stm32l1xx.o
-      1018         80          0          0       2040      10665   usart_code.o
+       150         12          0          0          0       3114   adc_code.o
+      1164         70          0         28          0      10349   agreement_code.o
+       952        126          0         36         20       5472   algorithm_code.o
+      4704       1278          0        116        112      18088   app_code.o
+      2148         90          0         16          0      22001   app_eep.o
+      1900        390          0        394          0      21415   app_key.o
+       320         16          0          0          0       5201   at21c512_code.o
+       716         62          0         52          0      10121   key_code.o
+      1248        202          0         16        552     372084   main.o
+      1206         88         19          1       1024      10957   oled_code.o
+        52          4       3867         80         16       2247   oledfont.o
+        24         12          0        149         24       6364   param_code.o
+       402          0          0          0          0       3459   pcf8563_code.o
+        36          8        244          0       1024        928   startup_stm32l151xba.o
+       162         24          0         12          0       3893   stm32l1xx_hal.o
+      1280         40          0          0          0       7079   stm32l1xx_hal_adc.o
+       198         14          0          0          0      30639   stm32l1xx_hal_cortex.o
+       592          8          0          0          0       5501   stm32l1xx_hal_dma.o
+       444         34          0          0          0       2803   stm32l1xx_hal_gpio.o
+      3840         96          0          0          0      18977   stm32l1xx_hal_i2c.o
+       684         70          0          0          0       4042   stm32l1xx_hal_msp.o
+      1740        108          0          0          0       6400   stm32l1xx_hal_rcc.o
+      1170         28          0          0          0       8250   stm32l1xx_hal_spi.o
+      1806          8          0          0          0      10885   stm32l1xx_hal_uart.o
+       104         18          0          0          0       5405   stm32l1xx_it.o
+         2          0         33          4          0       1183   system_stm32l1xx.o
+      1018         80          0          0       2040       9961   usart_code.o
 
     ----------------------------------------------------------------------
-     28106       2886       4196        924       4812     619810   Object Totals
+     28106       2886       4196        924       4812     606818   Object Totals
          0          0         32          0          0          0   (incl. Generated)
         44          0          1         20          0          0   (incl. Padding)
 
@@ -3669,8 +3669,8 @@ Image component sizes
 
       Code (inc. data)   RO Data    RW Data    ZI Data      Debug   
 
-     32872       2986       4196        924       4812     608222   Grand Totals
-     32872       2986       4196        420       4812     608222   ELF Image Totals (compressed)
+     32872       2986       4196        924       4812     595230   Grand Totals
+     32872       2986       4196        420       4812     595230   ELF Image Totals (compressed)
      32872       2986       4196        420          0          0   ROM Totals
 
 ==============================================================================
