@@ -2,6 +2,7 @@
 #include "adc_head.h"
 #include "cg_cal_guard.h" /* [CG32-03] */
 #include <stdlib.h>
+#include <float.h>
 
 float TempOffset = 0;
 float CG_Value_r = 0;
@@ -89,7 +90,9 @@ float Get_CG_Value(int16_t adc_value, float temp)
 }
 
 
-float Get_GJ_Value(uint16_t GJ_Ad,float temp)
+/* [CG38] One fit shared by gauge and CH; retain the existing three-point
+ * least-squares arithmetic and normal gauge results. No second filter. */
+static uint8_t GJ_Fit_Coefficients(float *k, float *b)
 {
     float x1 = (float)GJ_Param.GJ_1410_Ad;
     float y1 = 1410.0f;
@@ -106,20 +109,48 @@ float Get_GJ_Value(uint16_t GJ_Ad,float temp)
 
     int n = 3;
     float denominator = n * sumX2 - sumX * sumX;
-    // 防止分母为零（理论上不会发生，因三点不共线时分母非零）
-    if (denominator == 0.0f) {
-        // 退化为使用中点参考值，实际应用中应根据需求处理
-        return (y1 + y2 + y3) / n;
-    }
+    if (denominator <= 0.0f) return 0U;
+    *k = (n * sumXY - sumX * sumY) / denominator;
+    *b = (sumY - *k * sumX) / n;
+    return 1U;
+}
 
-    float k = (n * sumXY - sumX * sumY) / denominator;
-    float b = (sumY - k * sumX) / n;
-
-    // 计算实时AD值对应的长度
+float Get_GJ_Value(uint16_t GJ_Ad,float temp)
+{
+    float k, b;
+    (void)temp; /* Gauge has no temperature correction in the current model. */
+    if (!GJ_Fit_Coefficients(&k,&b)) return (1410.0f+1435.0f+1470.0f)/3.0f;
     GJ_Value = k * GJ_Ad + b;
     return GJ_Value;
 }
 
+uint8_t GJ_Get_Valid_Scale(float *scale)
+{
+    uint16_t a=GJ_Param.GJ_1410_Ad, b=GJ_Param.GJ_1435_Ad, c=GJ_Param.GJ_1470_Ad;
+    float offset;
+    if (scale == NULL || a==0U || b==0U || c==0U ||
+        a>0x7FFFU || b>0x7FFFU || c>0x7FFFU ||
+        !(((a<b)&&(b<c)) || ((a>b)&&(b>c))) ||
+        !(GJ_Param.temp>=-40.0f && GJ_Param.temp<=100.0f)) return 0U;
+    if (!GJ_Fit_Coefficients(scale,&offset)) return 0U;
+    return ((*scale>0.0f || *scale<0.0f) && fabsf(*scale)<=FLT_MAX) ? 1U : 0U;
+}
+
+uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb)
+{
+    float scale;
+    if (cz==NULL || hb==NULL || ad==0U || ad>0x7FFFU ||
+        CH_Param.CZ_Ad==0U || CH_Param.CZ_Ad>0x7FFFU ||
+        CH_Param.HB_Ad==0U || CH_Param.HB_Ad>0x7FFFU ||
+        !(CH_Param.temp>=-40.0f && CH_Param.temp<=100.0f) ||
+        !GJ_Get_Valid_Scale(&scale)) return 0U;
+    /* Independent contact references may have identical AD. Subtract in
+     * signed arithmetic so a movement below either reference stays negative.
+     * Shared mechanical ratio/direction must be checked on the actual heads. */
+    *cz = CH_CZ_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.CZ_Ad);
+    *hb = CH_HB_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.HB_Ad);
+    return 1U;
+}
 
 
 static uint8_t  Power_Ad_Cache_Index = 0,Power_Ad_Cache_Count = 0;

@@ -16,8 +16,8 @@ float   CG_Value_History = 0;                   //主界面   上一次的超高示值
 float   GJ_Value_History = 0;                   //主界面   上一次的轨距示值
 float   CG_Value = 180.12;                      //主界面   当前的超高示值
 float   GJ_Value = 1435.11;                     //主界面   当前的轨距示值
-float   CZ_Value = 1433.23;                     //查照数据
-float   HB_Value = -1435.12;                    //护背数据
+float   CZ_Value = 0.0f;                     //查照数据
+float   HB_Value = 0.0f;                    //护背数据
 
 uint8_t Set_Time[6]    = {24,8,5,1,59,32};      //时间设置界面 时间输入缓存数组分别对应 年 月 日 时 分 秒
 uint8_t Set_Time_Select = 0;                    //时间设置界面 当前选择要修改的时间项
@@ -60,6 +60,7 @@ uint8_t CG_Calibration_Status_History = 1;      //超高标定界面  上一次超高标定步
 uint8_t GJ_Calibration_Status = 0;              //轨距标定界面  当前轨距标定步骤
 uint8_t GJ_Calibration_Status_History = 1;      //轨距标定界面  上一次轨距标定步骤
 
+uint8_t CH_Cal_Save_Failed = 0U; /* [CG38] 1=EEP,2=cal,3=link,4=unstable */
 uint8_t CH_Calibration_Status = 0;              //查护标定界面  当前查护标定步骤
 uint8_t CH_Calibration_Status_History = 1;      //查护标定界面  上一次查护标定步骤
 

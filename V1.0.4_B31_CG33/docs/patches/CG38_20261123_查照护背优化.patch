@@ -1,0 +1,1035 @@
+--- a/STM32L151/Software/inc/agreement_head.h
++++ b/STM32L151/Software/inc/agreement_head.h
+@@ -91,5 +91,30 @@
+ 
+ 
+ 
++/* [CG38] Calibration-only window of the already filtered displacement AD.
++ * Thresholds are in mm using the actual gauge scale; not CG deadband counts.
++ * Provisional TEST limits; validate noise/repeatability on the actual gauge. */
++#define CH_CAL_STABLE_SAMPLES       10U
++#define CH_CAL_STABLE_TIME_MS       800U
++#define CH_CAL_MAX_GAP_MS           250U
++#define CH_CAL_STABLE_RANGE_MM      0.03f
++#define CH_CAL_MAX_MEAN_DRIFT_MM    0.01f
++typedef enum
++{
++    CH_CAL_CAPTURE_READY = 0,
++    CH_CAL_WAIT_DATA,
++    CH_CAL_WAIT_LINK,
++    CH_CAL_WAIT_TIME,
++    CH_CAL_WAIT_NOISE,
++    CH_CAL_WAIT_DRIFT,
++    CH_CAL_WAIT_SCALE
++} CH_CAL_WAIT_STATE;
++void Sensor_GJ_Stability_Reset(void);
++uint8_t Sensor_Get_Stable_GJ(uint16_t *value, float mm_per_ad);
++extern volatile uint32_t CH_Calibration_Range_AD;
++extern volatile float CH_Calibration_Range_MM;
++extern volatile float CH_Calibration_Trend_MM;
++extern volatile CH_CAL_WAIT_STATE CH_Calibration_Wait_State;
++
+ #endif
+ 
+--- a/STM32L151/Software/inc/algorithm_head.h
++++ b/STM32L151/Software/inc/algorithm_head.h
+@@ -20,6 +20,11 @@
+ float Get_CG_Value(int16_t CG_Ad,float temp);
+ 
+ float Get_GJ_Value(uint16_t GJ_Ad,float temp);
++/* [CG38] Shared displacement scale, independent CH reference positions. */
++#define CH_CZ_REFERENCE_MM 1391.0f
++#define CH_HB_REFERENCE_MM 1348.0f
++uint8_t GJ_Get_Valid_Scale(float *scale);
++uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb);
+ 
+ 
+ uint8_t Get_Driver_Power(uint16_t PowerAd);
+--- a/STM32L151/Software/inc/param_head.h
++++ b/STM32L151/Software/inc/param_head.h
+@@ -205,6 +205,7 @@
+ extern uint8_t GJ_Calibration_Status;
+ extern uint8_t GJ_Calibration_Status_History;
+ 
++extern uint8_t CH_Cal_Save_Failed; /* [CG38] */
+ extern uint8_t CH_Calibration_Status;
+ extern uint8_t CH_Calibration_Status_History;
+ 
+--- a/STM32L151/Software/src/Algorithm_code.c
++++ b/STM32L151/Software/src/Algorithm_code.c
+@@ -2,6 +2,7 @@
+ #include "adc_head.h"
+ #include "cg_cal_guard.h" /* [CG32-03] */
+ #include <stdlib.h>
++#include <float.h>
+ 
+ float TempOffset = 0;
+ float CG_Value_r = 0;
+@@ -89,7 +90,9 @@
+ }
+ 
+ 
+-float Get_GJ_Value(uint16_t GJ_Ad,float temp)
++/* [CG38] One fit shared by gauge and CH; retain the existing three-point
++ * least-squares arithmetic and normal gauge results. No second filter. */
++static uint8_t GJ_Fit_Coefficients(float *k, float *b)
+ {
+     float x1 = (float)GJ_Param.GJ_1410_Ad;
+     float y1 = 1410.0f;
+@@ -106,20 +109,48 @@
+ 
+     int n = 3;
+     float denominator = n * sumX2 - sumX * sumX;
+-    // ��ֹ��ĸΪ�㣨�����ϲ��ᷢ���������㲻����ʱ��ĸ���㣩
+-    if (denominator == 0.0f) {
+-        // �˻�Ϊʹ���е�ο�ֵ��ʵ��Ӧ����Ӧ����������
+-        return (y1 + y2 + y3) / n;
+-    }
+-
+-    float k = (n * sumXY - sumX * sumY) / denominator;
+-    float b = (sumY - k * sumX) / n;
+-
+-    // ����ʵʱADֵ��Ӧ�ĳ���
++    if (denominator <= 0.0f) return 0U;
++    *k = (n * sumXY - sumX * sumY) / denominator;
++    *b = (sumY - *k * sumX) / n;
++    return 1U;
++}
++
++float Get_GJ_Value(uint16_t GJ_Ad,float temp)
++{
++    float k, b;
++    (void)temp; /* Gauge has no temperature correction in the current model. */
++    if (!GJ_Fit_Coefficients(&k,&b)) return (1410.0f+1435.0f+1470.0f)/3.0f;
+     GJ_Value = k * GJ_Ad + b;
+     return GJ_Value;
+ }
+ 
++uint8_t GJ_Get_Valid_Scale(float *scale)
++{
++    uint16_t a=GJ_Param.GJ_1410_Ad, b=GJ_Param.GJ_1435_Ad, c=GJ_Param.GJ_1470_Ad;
++    float offset;
++    if (scale == NULL || a==0U || b==0U || c==0U ||
++        a>0x7FFFU || b>0x7FFFU || c>0x7FFFU ||
++        !(((a<b)&&(b<c)) || ((a>b)&&(b>c))) ||
++        !(GJ_Param.temp>=-40.0f && GJ_Param.temp<=100.0f)) return 0U;
++    if (!GJ_Fit_Coefficients(scale,&offset)) return 0U;
++    return ((*scale>0.0f || *scale<0.0f) && fabsf(*scale)<=FLT_MAX) ? 1U : 0U;
++}
++
++uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb)
++{
++    float scale;
++    if (cz==NULL || hb==NULL || ad==0U || ad>0x7FFFU ||
++        CH_Param.CZ_Ad==0U || CH_Param.CZ_Ad>0x7FFFU ||
++        CH_Param.HB_Ad==0U || CH_Param.HB_Ad>0x7FFFU ||
++        !(CH_Param.temp>=-40.0f && CH_Param.temp<=100.0f) ||
++        !GJ_Get_Valid_Scale(&scale)) return 0U;
++    /* Independent contact references may have identical AD. Subtract in
++     * signed arithmetic so a movement below either reference stays negative.
++     * Shared mechanical ratio/direction must be checked on the actual heads. */
++    *cz = CH_CZ_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.CZ_Ad);
++    *hb = CH_HB_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.HB_Ad);
++    return 1U;
++}
+ 
+ 
+ static uint8_t  Power_Ad_Cache_Index = 0,Power_Ad_Cache_Count = 0;
+--- a/STM32L151/Software/src/App_Eep.c
++++ b/STM32L151/Software/src/App_Eep.c
+@@ -126,10 +126,12 @@
+              ValidTemp(p->temp)) ? 1U : 0U;
+ }
+ 
++/* [CG38] Independent zero references may be equal; no CH slope is fitted.
++ * Keep the B3 layout/read compatibility. New writes also check ADC bounds. */
+ static uint8_t ValidCH(const CH_Calibration_Param_Str *p)
+ {
+     return (p->CZ_Ad != 0xFFFFU && p->HB_Ad != 0xFFFFU &&
+-            p->CZ_Ad != p->HB_Ad && ValidTemp(p->temp)) ? 1U : 0U;
++            ValidTemp(p->temp)) ? 1U : 0U;
+ }
+ 
+ static uint8_t ValidCal(const B3_CAL_DATA *p)
+@@ -494,6 +496,8 @@
+ uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str data)
+ {
+     B3_CAL_DATA staged;
++    if (data.CZ_Ad==0U || data.CZ_Ad>0x7FFFU ||
++        data.HB_Ad==0U || data.HB_Ad>0x7FFFU) return 0U;
+     B3_CalibrationFromGlobals(&staged);
+     staged.ch=data;
+     return B3_SaveCalibration(&staged);
+--- a/STM32L151/Software/src/App_code.c
++++ b/STM32L151/Software/src/App_code.c
+@@ -30,7 +30,7 @@
+ {
+     uint32_t CurrentTime=HAL_GetTick();
+     
+-    OLED_PrintString(40,4,"CG37 TEST",FONT_8X16);
++    OLED_PrintString(40,4,"CG38 TEST",FONT_8X16);
+     if((CurrentTime-ReflashTime)>1500)
+     {
+         set_PageId(page_main);
+@@ -191,9 +191,13 @@
+ /*************************���ջ�������***************************/
+ 
+ static float CZ_Value_S = 0,HB_Value_S = 0;
++static uint8_t CH_Display_Status_History=0xFFU;
++static uint8_t CH_Values_Need_Redraw=1U;
+ void CH_Page_Init(void)
+ {
+     CZ_Value_S = 0,HB_Value_S = 0;
++    CH_Display_Status_History=0xFFU;
++    CH_Values_Need_Redraw=1U;
+     OLED_PrintChinese(5,2,"����");
+     OLED_PrintString(44,2,":",FONT_8X16);
+     OLED_PrintChinese(5,5,"����");
+@@ -204,31 +208,49 @@
+ void CH_Page_Reflash(void)
+ {
+     char buffer[20];
+-    
+-    /*��ʾ�����ֵ*/
+-    //��ȡ��������
+-    if(CZ_Value_S != CZ_Value)
+-    {
+-        if(Data_Show_Percision == 1)
+-            snprintf(buffer,sizeof(buffer),"%+.2f",CZ_Value);
+-        else
+-            snprintf(buffer,sizeof(buffer),"%+.1f",CZ_Value);
+-        OLED_PrintString(52,2,buffer,FONT_8X16);
+-        CZ_Value_S  =  CZ_Value;
+-    }
+-    /*��ʾ������ֵ*/
+-    //��ȡ��������
+-    if(HB_Value_S != HB_Value)
+-    {
+-        if(Data_Show_Percision == 1)
+-            snprintf(buffer,sizeof(buffer),"%+.2f",HB_Value);
+-        else
+-            snprintf(buffer,sizeof(buffer),"%+.1f",HB_Value);
+-        OLED_PrintString(52,5,buffer,FONT_8X16);
+-        HB_Value_S  =  HB_Value;
+-    }
+-    /*��ʾʱ��*/
+-    //��ȡʱ������
++    uint8_t state=0U;
++    const char *error="";
++    if (!Sensor_Data_Is_Fresh()) { state=1U; error="NO SENSOR"; }
++    else if (Eep_Get_Storage_State()!=EEP_STATE_B3_VALID) { state=2U; error="EEP ERROR"; }
++    else if (GJ_Ad==0U || GJ_Ad>0x7FFFU) { state=3U; error="AD ERROR "; }
++    else if (!Get_CH_Values(GJ_Ad,&CZ_Value,&HB_Value)) { state=4U; error="CAL ERROR"; }
++    if (CH_Display_Status_History!=state)
++    {
++        OLED_PrintString(52,2,"         ",FONT_8X16);
++        OLED_PrintString(52,5,"         ",FONT_8X16);
++        CH_Values_Need_Redraw=1U;
++        CH_Display_Status_History=state;
++    }
++    if (state!=0U)
++    {
++        if (CH_Values_Need_Redraw)
++        {
++            OLED_PrintString(52,2,(char *)error,FONT_8X16);
++            OLED_PrintString(52,5,(char *)error,FONT_8X16);
++        }
++    }
++    else
++    {
++        if (CH_Values_Need_Redraw || CZ_Value_S!=CZ_Value)
++        {
++            int length=snprintf(buffer,sizeof(buffer),Data_Show_Percision==1 ? "%+.2f" : "%+.1f",CZ_Value);
++            /* Pad in one write: erase old digits without blanking the row. */
++            if (length<0 || length>9) snprintf(buffer,sizeof(buffer),"RANGE    ");
++            else { while(length<9) buffer[length++]=' '; buffer[9]='\0'; }
++            OLED_PrintString(52,2,buffer,FONT_8X16);
++            CZ_Value_S=CZ_Value;
++        }
++        if (CH_Values_Need_Redraw || HB_Value_S!=HB_Value)
++        {
++            int length=snprintf(buffer,sizeof(buffer),Data_Show_Percision==1 ? "%+.2f" : "%+.1f",HB_Value);
++            /* Pad in one write: erase old digits without blanking the row. */
++            if (length<0 || length>9) snprintf(buffer,sizeof(buffer),"RANGE    ");
++            else { while(length<9) buffer[length++]=' '; buffer[9]='\0'; }
++            OLED_PrintString(52,5,buffer,FONT_8X16);
++            HB_Value_S=HB_Value;
++        }
++    }
++    CH_Values_Need_Redraw=0U;
+     PCF8563_TimeTypeDef time;
+     PCF8563_GetTime(&hi2c2,&time);
+     snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
+@@ -714,47 +736,79 @@
+ /*************************�黤�궨���ý���***************************/
+ void CH_Calibration_Page_Init(void)
+ {
+-    CH_Calibration_Status = 0;
++    CH_Calibration_Status=0U;
++    CH_Calibration_Status_History=0xFFU;
++    CH_Cal_Save_Failed=0U;
++    CH_Param_Temp=CH_Param;
++    Sensor_GJ_Stability_Reset();
+ }
+ 
+ char CH_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
+ void CH_Calibration_Page_Reflash(void)
+ {
+-    if(CH_Calibration_Status_History!=CH_Calibration_Status)
++    char text[17];
++    const char *status="CAPTURED    ";
++    uint8_t fresh=Sensor_Data_Is_Fresh();
++    if (CH_Calibration_Status_History!=CH_Calibration_Status)
+     {
+         OLED_Clear();
+-        CH_Calibration_Status_History = CH_Calibration_Status;
+-    }
+-    switch(CH_Calibration_Status)
+-    {
+-        case 0:
+-            OLED_PrintChinese(24,1,"���ձ궨ֵ");
+-            OLED_PrintString(36,3,"1391mm",FONT_8X16);
+-            break;
+-        case 1:
+-            OLED_PrintChinese(32,1,"��");
+-            OLED_PrintString(48,1,"1391mm",FONT_8X16);
+-            snprintf(CH_buffer,sizeof(CH_buffer),"%05d",GJ_Ad);
+-            OLED_PrintString(44,4,CH_buffer,FONT_8X16);
+-            break;
+-        case 2:
+-            OLED_PrintChinese(24,1,"�����궨ֵ");
+-            OLED_PrintString(36,3,"1348mm",FONT_8X16);
+-            break;
+-        case 3:
+-            OLED_PrintChinese(32,1,"��");
+-            OLED_PrintString(48,1,"1348mm",FONT_8X16);
+-            snprintf(CH_buffer,sizeof(CH_buffer),"%05d",GJ_Ad);
+-            OLED_PrintString(44,4,CH_buffer,FONT_8X16);
+-            break;
+-        case 4:
+-            OLED_PrintChinese(32,1,"�黤�궨");
+-            OLED_PrintChinese(48,4,"�ɹ�");
+-            break;
+-        case 5:
+-            set_PageId(page_calibration_menu);
+-            break;
+-    }
++        CH_Calibration_Status_History=CH_Calibration_Status;
++    }
++    if (CH_Calibration_Status>=6U)
++    {
++        set_PageId(page_calibration_menu);
++        return;
++    }
++    if (CH_Calibration_Status<2U) OLED_PrintString(20,0,"CZ 1391mm",FONT_8X16);
++    else if (CH_Calibration_Status<4U) OLED_PrintString(20,0,"HB 1348mm",FONT_8X16);
++    else OLED_PrintChinese(32,0,"�黤�궨");
++    if (fresh) snprintf(text,sizeof(text),"AD:%05u",(unsigned)GJ_Ad);
++    else snprintf(text,sizeof(text),"AD:-----");
++    OLED_PrintString(28,2,text,FONT_8X16);
++    if (CH_Calibration_Status==1U || CH_Calibration_Status==3U)
++    {
++        snprintf(text,sizeof(text),"CAP:%05u",(unsigned)(CH_Calibration_Status==1U ?
++                 CH_Param_Temp.CZ_Ad : CH_Param_Temp.HB_Ad));
++        OLED_PrintString(28,4,text,FONT_8X16);
++    }
++    else if (CH_Calibration_Status==5U)
++    {
++        OLED_PrintChinese(48,4,"�ɹ�");
++        status="SAVED       ";
++    }
++    else
++    {
++        OLED_PrintChinese(24,4,"�洢������");
++        if (CH_Calibration_Status==4U)
++        {
++            status="SAVE?       ";
++            if (CH_Cal_Save_Failed==1U) status="EEP ERROR   ";
++            else if (CH_Cal_Save_Failed==2U) status="CAL ERROR   ";
++            else if (CH_Cal_Save_Failed==3U) status="NO SENSOR   ";
++        }
++        else
++        {
++            float scale;
++            uint16_t stable_ad;
++            if (!GJ_Get_Valid_Scale(&scale)) status="GJ CAL ERROR";
++            else if (!(Temp>=-40.0f && Temp<=100.0f)) status="TEMP ERROR  ";
++            else if (Sensor_Get_Stable_GJ(&stable_ad,scale)) status="READY       ";
++            else
++            {
++                switch (CH_Calibration_Wait_State)
++                {
++                    case CH_CAL_WAIT_LINK: status="WAIT LINK   "; break;
++                    case CH_CAL_WAIT_TIME: status="WAIT TIME   "; break;
++                    case CH_CAL_WAIT_NOISE: status="WAIT NOISE  "; break;
++                    case CH_CAL_WAIT_DRIFT: status="WAIT DRIFT  "; break;
++                    case CH_CAL_WAIT_SCALE: status="GJ CAL ERROR"; break;
++                    default: status="WAIT DATA   "; break;
++                }
++            }
++        }
++    }
++    if (!fresh && CH_Calibration_Status!=5U) status="NO SENSOR   ";
++    OLED_PrintString(16,6,(char *)status,FONT_8X16);
+ }
+ 
+ 
+--- a/STM32L151/Software/src/App_key.c
++++ b/STM32L151/Software/src/App_key.c
+@@ -408,27 +408,60 @@
+ 
+ void CH_Calibration_Storage(void)
+ {
+-    CH_Calibration_Status++;
+-    switch(CH_Calibration_Status)
+-    {
+-        case 1:
+-            CH_Param_Temp.CZ_Ad = GJ_Ad;
+-            break;
+-        case 3:
+-            CH_Param_Temp.HB_Ad = GJ_Ad;
+-            break;
+-        case 5:
+-            /* [B3] CH ADC/temperature now stored outside legacy node index. */
+-            CH_Param_Temp.temp = Temp;
+-            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
++    uint16_t captured_ad=0U;
++    float scale;
++    if (CH_Calibration_Status==0U || CH_Calibration_Status==2U ||
++        CH_Calibration_Status==4U)
++    {
++        if (!Sensor_Data_Is_Fresh()) CH_Cal_Save_Failed=3U;
++        else if (!GJ_Get_Valid_Scale(&scale) ||
++                 !(Temp>=-40.0f && Temp<=100.0f)) CH_Cal_Save_Failed=2U;
++        else if (CH_Calibration_Status!=4U &&
++                 !Sensor_Get_Stable_GJ(&captured_ad,scale)) CH_Cal_Save_Failed=4U;
++        else CH_Cal_Save_Failed=0U;
++        if (CH_Cal_Save_Failed!=0U)
++        {
++            CH_Calibration_Status_History=0xFFU;
++            Beep_Ctrl(100,3);
++            return;
++        }
++    }
++    switch (CH_Calibration_Status)
++    {
++        case 0U:
++            CH_Param_Temp.CZ_Ad=captured_ad;
++            CH_Calibration_Status=1U;
++            break;
++        case 1U:
++            CH_Calibration_Status=2U;
++            Sensor_GJ_Stability_Reset();
++            break;
++        case 2U:
++            CH_Param_Temp.HB_Ad=captured_ad;
++            CH_Calibration_Status=3U;
++            break;
++        case 3U:
++            CH_Calibration_Status=4U; /* collected, not committed */
++            break;
++        case 4U:
++            CH_Param_Temp.temp=Temp;
++            if (Eep_Save_CH_Calibration(CH_Param_Temp)==0U)
+             {
+-                CH_Calibration_Status = 4;
++                CH_Cal_Save_Failed=1U;
++                CH_Calibration_Status_History=0xFFU;
+                 Beep_Ctrl(100,3);
+                 return;
+             }
+-            Beep_Ctrl(100,1);
+-            break;
+-    }
++            CH_Cal_Save_Failed=0U;
++            CH_Calibration_Status=5U; /* only verified commit is success */
++            break;
++        case 5U:
++            CH_Calibration_Status=6U;
++            break;
++        default:
++            return;
++    }
++    Beep_Ctrl(100,1);
+ }
+ 
+ 
+--- a/STM32L151/Software/src/agreement_code.c
++++ b/STM32L151/Software/src/agreement_code.c
+@@ -1,4 +1,5 @@
+ #include "agreement_head.h"
++#include <float.h>
+ #include "param_head.h"
+ #include "usart_head.h"
+ #include "App_Eep.h"
+@@ -73,6 +74,64 @@
+     return 1U;
+ }
+ 
++/* [CG38] This buffer is only used when capturing CH calibration. The
++ * measurement path consumes GJ_Ad directly and has no added smoothing. */
++static uint16_t CH_Capture_Samples[CH_CAL_STABLE_SAMPLES];
++static uint32_t CH_Capture_Ticks[CH_CAL_STABLE_SAMPLES];
++static uint8_t CH_Capture_Index=0U, CH_Capture_Count=0U;
++volatile uint32_t CH_Calibration_Range_AD=0U;
++volatile float CH_Calibration_Range_MM=0.0f, CH_Calibration_Trend_MM=0.0f;
++volatile CH_CAL_WAIT_STATE CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
++
++void Sensor_GJ_Stability_Reset(void)
++{
++    CH_Capture_Index=0U;
++    CH_Capture_Count=0U;
++    CH_Calibration_Range_AD=0U;
++    CH_Calibration_Range_MM=0.0f;
++    CH_Calibration_Trend_MM=0.0f;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
++}
++
++uint8_t Sensor_Get_Stable_GJ(uint16_t *value, float mm_per_ad)
++{
++    uint16_t lowest=UINT16_MAX, highest=0U;
++    uint32_t sum=0U, early=0U, late=0U, drift;
++    uint8_t i;
++    const uint8_t half=CH_CAL_STABLE_SAMPLES/2U;
++    float scale=mm_per_ad<0.0f ? -mm_per_ad : mm_per_ad;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_SCALE;
++    if (!(scale>0.0f && scale<=FLT_MAX)) return 0U;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_LINK;
++    if (!Sensor_Data_Is_Fresh() ||
++        (uint32_t)(HAL_GetTick()-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS) return 0U;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
++    if (value==NULL || CH_Capture_Count<CH_CAL_STABLE_SAMPLES) return 0U;
++    for (i=0U;i<CH_CAL_STABLE_SAMPLES;++i)
++    {
++        uint16_t sample=CH_Capture_Samples[(CH_Capture_Index+i)%CH_CAL_STABLE_SAMPLES];
++        if (sample<lowest) lowest=sample;
++        if (sample>highest) highest=sample;
++        sum+=sample;
++        if (i<half) early+=sample;
++        else late+=sample;
++    }
++    drift=late>=early ? late-early : early-late;
++    CH_Calibration_Range_AD=(uint32_t)highest-lowest;
++    CH_Calibration_Range_MM=(float)CH_Calibration_Range_AD*scale;
++    CH_Calibration_Trend_MM=(float)drift*scale/(float)half;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_TIME;
++    if ((uint32_t)(Sensor_Last_Valid_Tick-CH_Capture_Ticks[CH_Capture_Index])<
++        CH_CAL_STABLE_TIME_MS) return 0U;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_NOISE;
++    if (CH_Calibration_Range_MM>CH_CAL_STABLE_RANGE_MM) return 0U;
++    CH_Calibration_Wait_State=CH_CAL_WAIT_DRIFT;
++    if (CH_Calibration_Trend_MM>CH_CAL_MAX_MEAN_DRIFT_MM) return 0U;
++    *value=(uint16_t)((sum+CH_CAL_STABLE_SAMPLES/2U)/CH_CAL_STABLE_SAMPLES);
++    CH_Calibration_Wait_State=CH_CAL_CAPTURE_READY;
++    return 1U;
++}
++
+ int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
+ {
+     UToI uToi_Temp;
+@@ -135,6 +194,18 @@
+         CG_Capture_Ticks[CG_Capture_Index] = now;
+         CG_Capture_Index = (uint8_t)((CG_Capture_Index + 1U) % CG_CAL_STABLE_SAMPLES);
+         if (CG_Capture_Count < CG_CAL_STABLE_SAMPLES) CG_Capture_Count++;
++        if (Sensor_Frame_Seen &&
++            (uint32_t)(now-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS)
++            Sensor_GJ_Stability_Reset();
++        if (GJ_Ad==0U || GJ_Ad>0x7FFFU)
++            Sensor_GJ_Stability_Reset();
++        else
++        {
++            CH_Capture_Samples[CH_Capture_Index]=GJ_Ad;
++            CH_Capture_Ticks[CH_Capture_Index]=now;
++            CH_Capture_Index=(uint8_t)((CH_Capture_Index+1U)%CH_CAL_STABLE_SAMPLES);
++            if (CH_Capture_Count<CH_CAL_STABLE_SAMPLES) CH_Capture_Count++;
++        }
+         Sensor_Last_Valid_Tick = now;
+     }
+     Sensor_Frame_Seen = 1;
+--- a/STM32L151/Software/src/param_code.c
++++ b/STM32L151/Software/src/param_code.c
+@@ -16,8 +16,8 @@
+ float   GJ_Value_History = 0;                   //������   ��һ�εĹ��ʾֵ
+ float   CG_Value = 180.12;                      //������   ��ǰ�ĳ���ʾֵ
+ float   GJ_Value = 1435.11;                     //������   ��ǰ�Ĺ��ʾֵ
+-float   CZ_Value = 1433.23;                     //��������
+-float   HB_Value = -1435.12;                    //��������
++float   CZ_Value = 0.0f;                     //��������
++float   HB_Value = 0.0f;                    //��������
+ 
+ uint8_t Set_Time[6]    = {24,8,5,1,59,32};      //ʱ�����ý��� ʱ�����뻺������ֱ��Ӧ �� �� �� ʱ �� ��
+ uint8_t Set_Time_Select = 0;                    //ʱ�����ý��� ��ǰѡ��Ҫ�޸ĵ�ʱ����
+@@ -60,6 +60,7 @@
+ uint8_t GJ_Calibration_Status = 0;              //���궨����  ��ǰ���궨����
+ uint8_t GJ_Calibration_Status_History = 1;      //���궨����  ��һ�ι��궨����
+ 
++uint8_t CH_Cal_Save_Failed = 0U; /* [CG38] 1=EEP,2=cal,3=link,4=unstable */
+ uint8_t CH_Calibration_Status = 0;              //�黤�궨����  ��ǰ�黤�궨����
+ uint8_t CH_Calibration_Status_History = 1;      //�黤�궨����  ��һ�β黤�궨����
+ 
+--- /dev/null
++++ b/docs/guides/CG38_20261123_查照护背测试说明.md
+@@ -0,0 +1,94 @@
++# CG38 TEST 查照间隔与护背距离
++
++2026-11-23。基于 c97c4e9 / CG37 TEST，主控 STM32L151，配套现有 CG34 TEST 倾角板。
++
++## 烧录与适用范围
++
++主控固件为 `firmware/CG38_TEST_20261123/STM32L151_CG38_TEST.hex`，开机显示 CG38 TEST。倾角板已经是 CG34 TEST 的样机只更新主控。本次没有修改或重新发布倾角板固件，也没有执行硬件烧录。
++
++首次使用本版，请先确认轨距标定有效，再重新进行查护标定，并完成下面的实机检查。历史查护参数可能来自旧版单帧采集，出厂默认的 10000/13000 也不是这把尺子的实测标定结果。
++
++本版采用“共用位移换算斜率、查照和护背各自标定基准”的模型。需要验证尺子的三种接触方式确实具有相同传动比例和方向。已提供的 ATGJ-1 左右测量块照片能看到 1435 标记和开口结构，但没有尺子测头的接触姿态，也不能据照片确认 43/44 mm 的实际尺寸。1391/1348 测量面及放置方法应以本机有效说明书、检定证书和实际测头结构核实。本版是待实机验证的测试版，不代表精度或检定合格结论。
++
++## 实时计算与滤波
++
++倾角板继续按 100 ms 调度读取位移，确认新转换后执行原滤波：旧结果 × 0.5 + 本次采样 × 0.5；串口每 100 ms 上报。轨距、查照、护背均使用同一份已滤波的 `GJ_Ad`，查护没有增加测量滤波、死区或等待窗口。
++
++主控从轨距 1410/1435/1470 三点的原线性最小二乘算法取得斜率 k（mm/AD）。原正常轨距换算算式保留，查护计算为：
++
++```text
++查照 = 1391 + k × (GJ_Ad - CH_Param.CZ_Ad)
++护背 = 1348 + k × (GJ_Ad - CH_Param.HB_Ad)
++```
++
++AD 差值用有符号 32 位计算，低于基准时不会发生无符号回绕。两个基准 AD 可以都为 10318，不用两者之差拟合斜率。两者相等本身不能证明测头放置正确，仍需用已知尺寸变化验证。更改轨距标定后，需复核并重新标定查护。
++
++查护使用与轨距相同的一位/两位小数设置，直接更新实际换算值。数字用固定宽度一次覆盖，避免旧位数残留和每次更新前整行清空。链路超时显示 NO SENSOR，存储异常显示 EEP ERROR，位移 AD 为 0 或超过 32767 显示 AD ERROR，基准或轨距标定无效显示 CAL ERROR。
++
++沿用轨距现有模型，没有新增温度补偿；标定温度仍保存并检查有效范围。当前协议没有单独的 ADS1110 转换有效性字段，串口帧新鲜不等于能够证明传感器每帧都完成了一次新转换。
++
++## 查护标定流程
++
++先确认轨距三个标定值已实际保存并能断电重读。轨距原标定流程本次未改，它原来的“成功”画面之后还需再按一次存储键，才调用 EEPROM 保存；不能仅凭该旧提示判断轨距已保存。
++
++按确认过的测头接触方式建立查照 1391 mm、护背 1348 mm 基准。程序只负责采集 AD，不能识别尺子是否放在正确测量面。
++
++| 操作顺序 | 操作和界面 | 数据状态 |
++| --- | --- | --- |
++| 进入 | CZ 1391mm，实时 AD，WAIT/READY | 清空本次稳定采集窗口 |
++| 第一次存储键 | READY 后采集查照，显示 CAP 和 CAPTURED | 十帧均值暂存在 RAM，尚未写 EEPROM |
++| 第二次存储键 | 切换到 HB 1348mm，重新等待 READY | 清空窗口，随后按护背姿态放置并稳定 |
++| 第三次存储键 | READY 后采集护背，显示 CAP 和 CAPTURED | 护背均值暂存在 RAM |
++| 第四次存储键 | 显示 SAVE? 和存储键保存提示 | 等待最终提交，尚未成功 |
++| 第五次存储键 | EEPROM 写入、读回与 CRC 校验通过后显示“成功”和 SAVED | 完成提交，新参数立即生效 |
++| 第六次存储键 | 返回标定菜单 | 流程结束 |
++
++AD 行在采集前后持续更新；CAP 行是本次采集值，不随实时 AD 变化。EEPROM 失败显示 EEP ERROR 并停留在最终提交页，可以重试。未稳定、断线或温度/轨距参数无效时不推进采集状态。退出再进入会重新开始采集，不写入未完成的标定。
++
++## 标定稳定参数
++
++这些参数仅用于按键采集，不影响正常测量的响应。位置为 `STM32L151/Software/inc/agreement_head.h`。
++
++| 参数 | 本版测试值 | 含义 |
++| --- | --- | --- |
++| CH_CAL_STABLE_SAMPLES | 10 | 最近十个校验正确的位移报告 |
++| CH_CAL_STABLE_TIME_MS | 800 ms | 十帧跨度下限，正常约 900 ms |
++| CH_CAL_MAX_GAP_MS | 250 ms | 帧间断档重置窗口，最后一帧超时不采集 |
++| CH_CAL_STABLE_RANGE_MM | 0.03 mm | 十帧最大值减最小值的毫米换算上限 |
++| CH_CAL_MAX_MEAN_DRIFT_MM | 0.01 mm | 前五帧与后五帧均值差的毫米换算上限 |
++
++0.03/0.01 mm 是本次测试起始参数，尚未经过本机噪声验证，不是精度承诺。阈值按实际轨距斜率换算，未照搬超高 AD 门槛。
++
++WAIT DATA 为帧数不足，WAIT TIME 为跨度不足，WAIT NOISE 为峰峰值过大，WAIT DRIFT 为缓慢移动，WAIT LINK 为短时断档；NO SENSOR 为总体链路超时，GJ CAL ERROR 为轨距标定不能提供有效斜率。
++
++Keil Watch 可观察 `GJ_Ad`、`CH_Param`、`CH_Param_Temp`、`CH_Calibration_Range_AD`、`CH_Calibration_Range_MM`、`CH_Calibration_Trend_MM`、`CH_Calibration_Wait_State` 和 `CH_Cal_Save_Failed`。后者 0=无失败，1=保存失败，2=标定/温度无效，3=断线，4=采集未稳定。
++
++## 实机验收记录
++
++1. 更新主控并确认 CG38 TEST。进入查护测量页，改变测头位移，检查示值持续变化。
++2. 核对轨距三点参数，按正确测量面完成查护标定。两项同为 10318 时应可提交，最终必须看到 SAVED。
++3. 分别回到 1391/1348 基准，记录示值；用检定器配套量杆/块规建立附近至少一个较小和一个较大尺寸，验证方向、变化量和误差。按当前接触姿态读取对应项目。
++4. 每项取下重新放置至少五次，记录标准值、实时 AD、示值、最大误差和重复性；固定不动记录波动，改变尺寸记录稳定时间。
++5. 正常保存后断电重启，复测两项基准与附近尺寸，确认参数与结果可复现。
++6. 观察 WAIT 原因是否符合实际。READY 很难出现时记录峰峰值/漂移诊断，再决定是否调整标定阈值。
++7. 复测原轨距及超高的水平、左右 180 mm，确认原功能。
++
++主机测试中的断线、写保护和断电故障是模拟注入，没有在用户设备上进行故障实验。实际误差、重复性、响应时间及 OLED 观感仍需用户实机验证。
++
++## EEPROM 兼容与回退
++
++保留 B3.1 地址、槽大小、CRC 和 A/B 提交流程，未清空 EEPROM。新增查护写入检查：两个 AD 各自为 1～32767，温度在有效范围内；读取历史结构继续兼容。取消了两个 AD 必须不同的规则。
++
++**保存相同 AD 后，不宜直接回刷 CG37 或更早固件。** 旧版会把这份完整标定快照判为无效，可能回退到较旧的整份快照，或显示 EEPROM 错误，涉及轨距、超高等同一快照中的参数。如需回退，应先备份完整 EEPROM，并使用包含“允许查护相同 AD”修正的兼容回退固件。
++
++## 软件验证和交付文件
++
++- 查护专项 98500 项检查通过，包含 1～32767 AD 扫描、相等/不同基准、有符号差值、反向斜率、标定按键和实时显示、失败重试、通信恢复、显示边界及中文字库检查。
++- B31 EEPROM 357 项断言通过，覆盖相同 AD 保存/重读、无效输入、写保护、提交阶段失败和旧副本恢复。
++- B2 串口/判稳共 91 项断言通过，包含毫米阈值、半窗漂移、断档、校验失败、无效 AD、时间回绕。
++- 原超高全 AD 扫描、CG37 页面、倾角滤波 202 项、ADC161 七组读码、CG34 调度、B2 倾角板 ACK/噪声回归通过。
++- 主控 Keil 全量编译零错误、零警告。Windows GCC 本次功能回归未启用 UBSan，因为已安装工具链没有对应运行库；POSIX 原测试入口继续默认启用 UBSan。
++
++统一入口仍为 `sh tests/CG32_HOST_TESTS/run_cg32_tests.sh`，现已包含查护专项。查护单独运行 `python3 tests/CG38_HOST_TESTS/test_ch.py`，无 UBSan 的工具链可明确设置 `HOST_SANITIZERS=0`。
++
++固件目录包含 HEX、Keil 编译日志、主机测试输出、测试记录、源码校验清单和 SHA256SUMS.txt。增量补丁见 `docs/patches/CG38_20261123_查照护背优化.patch`。
+--- a/tests/B2_HOST_TESTS/test_main.c
++++ b/tests/B2_HOST_TESTS/test_main.c
+@@ -118,6 +118,54 @@
+         feed(&huart1,frame,13);
+         UART_Process_Received(UART1_ID);
+     }
++}
++
++
++/* [CG38] Actual UART parser/window, including CRC, timing and tick wrap. */
++static void ch_window(const uint16_t *samples, uint32_t period)
++{
++    uint8_t frame[13]; unsigned i;
++    Sensor_GJ_Stability_Reset();
++    for(i=0;i<CH_CAL_STABLE_SAMPLES;i++) {
++        fake_tick+=period; u1(samples[i],0,20.0f,frame);
++        feed(&huart1,frame,13); UART_Process_Received(UART1_ID);
++    }
++}
++static void test_ch_capture(void)
++{
++    uint16_t ad=0, a[10]={10318,10318,10318,10318,10318,10318,10318,10318,10318,10318};
++    uint8_t f[13]; unsigned i;
++    ch_window(a,100);
++    CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10318);
++    CHECK(CH_Calibration_Wait_State==CH_CAL_CAPTURE_READY);
++    CHECK(Sensor_Get_Stable_GJ(&ad,-0.003f));
++    CHECK(!Sensor_Get_Stable_GJ(NULL,0.003f));
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.0f) && CH_Calibration_Wait_State==CH_CAL_WAIT_SCALE);
++    ch_window(a,88); CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_TIME);
++    ch_window(a,89); CHECK(Sensor_Get_Stable_GJ(&ad,0.003f));
++    fake_tick+=249; CHECK(Sensor_Get_Stable_GJ(&ad,0.003f));
++    fake_tick++; CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_LINK);
++    u1(10318,0,20,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DATA);
++    for(i=0;i<10;i++) a[i]=(uint16_t)(10318+(i%2 ? 9 : 0));
++    ch_window(a,100); CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10323);
++    CHECK(CH_Calibration_Range_AD==9U);
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.004f) && CH_Calibration_Wait_State==CH_CAL_WAIT_NOISE);
++    for(i=0;i<10;i++) a[i]=(uint16_t)(10318+(i>=5 ? 4 : 0));
++    ch_window(a,100); CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DRIFT);
++    for(i=0;i<10;i++) a[i]=10318;
++    ch_window(a,100); Sensor_GJ_Stability_Reset();
++    u1(10318,0,20,f); f[10]^=1;
++    for(i=0;i<10;i++) {fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);}
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
++    ch_window(a,100); u1(0,0,20,f); fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DATA);
++    ch_window(a,100); u1(0x8000,0,20,f); fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
++    fake_tick=UINT32_MAX-450U; ch_window(a,100);
++    CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10318);
++    Sensor_GJ_Stability_Reset();
++    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
+ }
+ 
+ int main(void) {
+@@ -318,5 +366,7 @@
+         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),
+         (unsigned long)UART_Get_Dropped_Frame_Count(UART1_ID),
+         (unsigned long)UART_Get_Bad_Frame_Count(UART2_ID));
++    test_ch_capture();
++    printf("CG38 UART/capture checks included: %u assertions total\n",tests);
+     return 0;
+ }
+--- a/tests/B31_HOST_TESTS/test_b31.c
++++ b/tests/B31_HOST_TESTS/test_b31.c
+@@ -327,8 +327,39 @@
+     CHECK(Eep_Clear_Node()==0);
+ }
+ 
++
++static void test_ch_equal_and_failure(void)
++{
++    CH_Calibration_Param_Str ch={10318,10318,23.0f};
++    unsigned before,cut;
++    reset_all(); CHECK(Eep_Data_Get()==1);
++    CHECK(Eep_Save_CH_Calibration(ch)==1);
++    CHECK(CH_Param.CZ_Ad==10318 && CH_Param.HB_Ad==10318);
++    before=writes; reset_globals(); CHECK(Eep_Data_Get()==1);
++    CHECK(writes==before && CH_Param.CZ_Ad==10318 && CH_Param.HB_Ad==10318);
++    CHECK(CH_Param.temp==23.0f);
++    ch.CZ_Ad=0; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
++    ch.CZ_Ad=0x8000; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
++    ch.CZ_Ad=10318; ch.HB_Ad=0xFFFF; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
++    ch.HB_Ad=10318; ch.temp=101; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
++    ch.temp=23; ch.CZ_Ad=10400; wp=1;
++    CHECK(Eep_Save_CH_Calibration(ch)==0 && CH_Param.CZ_Ad==10318);
++    wp=0; reset_globals(); CHECK(Eep_Data_Get()==1 && CH_Param.CZ_Ad==10318);
++    for(cut=0;cut<3;cut++) {
++        reset_all(); CHECK(Eep_Data_Get()==1);
++        fail_after_writes=(int)writes+(int)cut;
++        CHECK(Eep_Save_CH_Calibration(ch)==0);
++        CHECK(CH_Param.CZ_Ad==10000 && CH_Param.HB_Ad==13000);
++        fail_after_writes=-1; reset_globals(); CHECK(Eep_Data_Get()==1);
++        CHECK(CH_Param.CZ_Ad==10000 && CH_Param.HB_Ad==13000);
++    }
++    CHECK(Eep_Save_CH_Calibration(ch)==1);
++    reset_globals(); CHECK(Eep_Data_Get()==1 && CH_Param.CZ_Ad==10400 && CH_Param.HB_Ad==10318);
++}
++
+ int main(void)
+ {
++    test_ch_equal_and_failure();
+     test_driver();
+     test_factory_init_once();
+     test_nonblank_locked();
+--- a/tests/CG32_HOST_TESTS/run_cg32_tests.sh
++++ b/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+@@ -11,6 +11,7 @@
+ UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
+ python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
+ python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
++python3 "$TESTS/CG38_HOST_TESTS/test_ch.py"
+ sh "$TESTS/B31_HOST_TESTS/run_b31_tests.sh"
+ sh "$TESTS/B2_HOST_TESTS/run_master_tests.sh"
+ python3 "$TESTS/B2_HOST_TESTS/test_qing.py"
+--- /dev/null
++++ b/tests/CG38_HOST_TESTS/test_ch.py
+@@ -0,0 +1,191 @@
++#!/usr/bin/env python3
++"""CG38 checks compiled from the actual CH math, receiver, key and OLED code.
++
++CC selects the compiler. Set HOST_SANITIZERS=0 only when UBSan is unavailable.
++No hardware is accessed. EEPROM persistence/fault injection lives in B31 tests.
++"""
++from pathlib import Path
++import os, re, subprocess, tempfile
++
++root=Path(__file__).resolve().parents[2]
++def read(p):
++    return (root/p).read_bytes().decode('gb18030').replace('\r\n','\n')
++def function(s,sig):
++    a=s.index(sig); b=s.index('{',a); depth=0
++    for i in range(b,len(s)):
++        depth+=(s[i]=='{')-(s[i]=='}')
++        if depth==0: return s[a:i+1]+'\n'
++    raise ValueError(sig)
++algorithm=read('STM32L151/Software/src/Algorithm_code.c')
++receiver=read('STM32L151/Software/src/agreement_code.c')
++key=read('STM32L151/Software/src/App_key.c')
++oled=read('STM32L151/Software/src/App_code.c')
++header=read('STM32L151/Software/inc/agreement_head.h')
++algo_header=read('STM32L151/Software/inc/algorithm_head.h')
++font_source=read('STM32L151/Software/src/oledfont.c')
++for label in re.findall(r'OLED_PrintChinese\([^;]*?"([^"]+)"',function(oled,'void CH_Calibration_Page_Reflash(')):
++    assert all(char in font_source for char in label), ('Missing OLED glyph',label)
++definitions='\n'.join(line for line in header.splitlines() if line.startswith('#define SENSOR_') or line.startswith('#define CG_CAL_') or line.startswith('#define CH_CAL_'))
++definitions+='\n'+'\n'.join(line for line in algo_header.splitlines() if line.startswith('#define CH_'))+'\n'
++for name in ['CG','CH']:
++    a=header.index('typedef enum\n{\n    '+name+'_CAL_CAPTURE_READY')
++    b=header.index('} '+name+'_CAL_WAIT_STATE;',a)+len('} '+name+'_CAL_WAIT_STATE;')
++    definitions+=header[a:b]+'\n'
++rxprefix=receiver[:receiver.index('int16_t Unsigned_Six_To_Signed_Six(')]
++rxprefix=re.sub(r'^#include.*\n','',rxprefix,flags=re.M)
++code=r'''
++#include <assert.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <math.h>
++#include <float.h>
++typedef struct {uint16_t GJ_1410_Ad,GJ_1435_Ad,GJ_1470_Ad;float temp;} GJ_Calibration_Param_Str;
++typedef struct {uint16_t CZ_Ad,HB_Ad;float temp;} CH_Calibration_Param_Str;
++typedef union {uint16_t uinf;int16_t inf;} UToI;
++typedef union {uint32_t inf;float flo;} FToI;
++GJ_Calibration_Param_Str GJ_Param={7781,15946,27395,20.0f};
++CH_Calibration_Param_Str CH_Param={10318,10318,20.0f},CH_Param_Temp;
++uint16_t GJ_Ad; int16_t CG_Ad; float Temp=20.0f,GJ_Value,CZ_Value,HB_Value;
++uint8_t CH_Calibration_Status,CH_Calibration_Status_History,CH_Cal_Save_Failed,Data_Show_Percision=1;
++static uint32_t tick=1000;
++uint32_t HAL_GetTick(void){return tick;}
++static unsigned checks=0;
++#define CHECK(x) do{assert(x);checks++;}while(0)
++'''+definitions+rxprefix
++for sig in ['int16_t Unsigned_Six_To_Signed_Six(', 'float Unsigned_Six_To_Float(', 'uint8_t Get_Add_Verify(', 'uint8_t Sensor_Data_Receive_For_Uart1(']:
++    code+=function(receiver,sig)
++for sig in ['static uint8_t GJ_Fit_Coefficients(', 'float Get_GJ_Value(', 'uint8_t GJ_Get_Valid_Scale(', 'uint8_t Get_CH_Values(']:
++    code+=function(algorithm,sig)
++code+=r'''
++static unsigned save_calls=0,beeps=0; static uint8_t save_ok=0;
++uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str value) {
++    save_calls++; if(!save_ok)return 0;CH_Param=value;return 1;
++}
++void Beep_Ctrl(unsigned ms,unsigned n){(void)ms;beeps=n;}
++#define FONT_8X16 1
++#define FONT_6X8 2
++#define EEP_STATE_B3_VALID 1
++#define page_calibration_menu 7
++static unsigned storage_state=1,page_id=0;
++unsigned Eep_Get_Storage_State(void){return storage_state;}
++typedef struct {unsigned year,month,day,hour,minute;} PCF8563_TimeTypeDef;
++static int hi2c2;
++void PCF8563_GetTime(void *h,PCF8563_TimeTypeDef *t){(void)h;*t=(PCF8563_TimeTypeDef){26,11,23,12,0};}
++void set_PageId(unsigned p){page_id=p;}
++static char texts[100][40];static unsigned ntexts=0,clears=0;
++void OLED_Clear(void){clears++;}
++static void rect(unsigned x,unsigned y,unsigned w,unsigned h){CHECK(x+w<=128 && y+h<=8);}
++static uint8_t power_4_ico[16];
++void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,uint8_t *data){(void)data;rect(x,y,w,(h+7U)/8U);}
++void OLED_PrintString(unsigned x,unsigned y,char *s,unsigned font){
++    rect(x,y,(unsigned)strlen(s)*(font==FONT_8X16?8U:6U),font==FONT_8X16?2U:1U);
++    assert(ntexts<100);snprintf(texts[ntexts++],40,"%s",s);
++}
++void OLED_PrintChinese(unsigned x,unsigned y,char *s){
++    unsigned chars=0;const unsigned char*p=(unsigned char*)s;
++    while(*p){if((*p&0xC0)!=0x80)chars++;p++;}
++    rect(x,y,chars*16U,2U);
++    assert(ntexts<100);snprintf(texts[ntexts++],40,"%s",s);
++}
++static void screen_reset(void){ntexts=0;}
++static int saw(const char *s){
++    unsigned i;size_t a=strlen(s);while(a && s[a-1]==' ')a--;
++    for(i=0;i<ntexts;i++){size_t b=strlen(texts[i]);while(b && texts[i][b-1]==' ')b--;if(a==b && strncmp(s,texts[i],a)==0)return 1;}return 0;
++}
++static float CZ_Value_S=0,HB_Value_S=0;
++static uint8_t CH_Display_Status_History=0xFFU,CH_Values_Need_Redraw=1;
++'''
++for sig in ['void CH_Page_Init(', 'void CH_Page_Reflash(', 'void CH_Calibration_Page_Init(', 'void CH_Calibration_Page_Reflash(']:
++    code+=function(oled,sig)
++code+=function(key,'void CH_Calibration_Storage(')
++code+=r'''
++static void frame(uint16_t ad){
++    uint8_t f[13]={0x5A,10,0,0,0,0,0,0,0,0,0,13,10};FToI t;
++    t.flo=Temp;f[2]=(uint8_t)(ad>>8);f[3]=(uint8_t)ad;
++    f[6]=(uint8_t)(t.inf>>24);f[7]=(uint8_t)(t.inf>>16);f[8]=(uint8_t)(t.inf>>8);f[9]=(uint8_t)t.inf;
++    f[10]=Get_Add_Verify(f,10);tick+=100;CHECK(Sensor_Data_Receive_For_Uart1(f,13)==3);
++}
++static void window(uint16_t ad){unsigned i;for(i=0;i<10;i++)frame(ad);}
++static void test_math(void){
++    unsigned ad;float cz,hb,k,g0,g,prev;
++    GJ_Calibration_Param_Str original=GJ_Param;
++    CHECK(GJ_Get_Valid_Scale(&k));
++    CHECK(Get_CH_Values(10318,&cz,&hb) && cz==1391.0f && hb==1348.0f);
++    CHECK(Get_CH_Values(10317,&cz,&hb) && cz<1391.0f && hb<1348.0f);
++    CHECK(Get_CH_Values(10319,&cz,&hb) && cz>1391.0f && hb>1348.0f);
++    g0=Get_GJ_Value(10318,20);prev=-1.0e9f;
++    for(ad=1;ad<=32767;ad++){
++        CHECK(Get_CH_Values((uint16_t)ad,&cz,&hb));
++        g=Get_GJ_Value((uint16_t)ad,20);
++        CHECK(fabsf((cz-1391.0f)-(g-g0))<0.001f);
++        CHECK(cz>=prev && fabsf((cz-hb)-43.0f)<0.001f);prev=cz;
++    }
++    CH_Param.HB_Ad=11000;CHECK(Get_CH_Values(11000,&cz,&hb) && hb==1348.0f && cz>1391.0f);
++    CH_Param.CZ_Ad=11000;CH_Param.HB_Ad=10318;
++    CHECK(Get_CH_Values(11000,&cz,&hb) && cz==1391.0f && hb>1348.0f);
++    GJ_Param=(GJ_Calibration_Param_Str){11000,8500,5000,20};CH_Param.CZ_Ad=CH_Param.HB_Ad=10318;
++    CHECK(GJ_Get_Valid_Scale(&k) && k<0);
++    CHECK(Get_CH_Values(10418,&cz,&hb) && fabsf(cz-1390.0f)<0.001f);
++    CHECK(Get_CH_Values(10218,&cz,&hb) && fabsf(hb-1349.0f)<0.001f);
++    GJ_Param.GJ_1435_Ad=GJ_Param.GJ_1410_Ad;CHECK(!Get_CH_Values(10318,&cz,&hb));
++    GJ_Param=original;CHECK(!Get_CH_Values(0,&cz,&hb));CHECK(!Get_CH_Values(0x8000,&cz,&hb));
++    CHECK(!Get_CH_Values(10318,NULL,&hb));
++    CH_Param.CZ_Ad=0;CHECK(!Get_CH_Values(10318,&cz,&hb));CH_Param.CZ_Ad=10318;
++    CH_Param.temp=NAN;CHECK(!Get_CH_Values(10318,&cz,&hb));CH_Param.temp=20;
++    puts("CG38 math: PASS; full positive ADC sweep, shared gauge scale, independent/equal zeros, signed deltas, reversed slope, invalid data");
++}
++static void test_calibration(void){
++    unsigned i;uint16_t ad;float k;CH_Calibration_Page_Init();
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==0 && save_calls==0);
++    frame(10318);CH_Calibration_Storage();CHECK(CH_Calibration_Status==0 && CH_Cal_Save_Failed==4);
++    window(10318);screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("READY       ")&&saw("AD:10318"));
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==1 && CH_Param_Temp.CZ_Ad==10318 && save_calls==0);
++    frame(10325);screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("AD:10325")&&saw("CAP:10318")&&saw("CAPTURED    "));
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==2);
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==2 && CH_Cal_Save_Failed==4);
++    window(10318);CH_Calibration_Storage();CHECK(CH_Calibration_Status==3 && CH_Param_Temp.HB_Ad==10318);
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==4 && save_calls==0);
++    screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("SAVE?       ") && !saw("成功"));
++    CH_Calibration_Storage();CHECK(CH_Calibration_Status==4 && CH_Cal_Save_Failed==1 && save_calls==1 && beeps==3);
++    screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("EEP ERROR   ")&&!saw("成功"));
++    tick+=1500;save_ok=1;CH_Calibration_Storage();CHECK(CH_Calibration_Status==4 && save_calls==1 && CH_Cal_Save_Failed==3);
++    frame(10318);CH_Calibration_Storage();CHECK(CH_Calibration_Status==5 && save_calls==2 && beeps==1);
++    CHECK(CH_Param.CZ_Ad==10318 && CH_Param.HB_Ad==10318);
++    screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("成功")&&saw("SAVED       "));
++    tick+=1500;screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("AD:-----")&&saw("SAVED       "));
++    CH_Calibration_Storage();screen_reset();CH_Calibration_Page_Reflash();CHECK(page_id==page_calibration_menu);
++    CH_Calibration_Page_Init();CHECK(CH_Calibration_Status==0 && CH_Cal_Save_Failed==0);
++    window(10318);Temp=NAN;CH_Calibration_Storage();CHECK(CH_Cal_Save_Failed==2 && save_calls==2);Temp=20;
++    CHECK(GJ_Get_Valid_Scale(&k));CHECK(Sensor_Get_Stable_GJ(&ad,k));
++    CH_Calibration_Page_Init();CHECK(!Sensor_Get_Stable_GJ(&ad,k));
++    for(i=0;i<6;i++){
++        CH_Calibration_Status=(uint8_t)i;CH_Calibration_Status_History=0xFF;frame(32767);
++        screen_reset();CH_Calibration_Page_Reflash();CHECK(saw("AD:32767"));
++    }
++    puts("CG38 calibration: PASS; live vs captured AD, window reset, equal zeros, save confirmation/failure/retry, stale/temperature guards, OLED bounds");
++}
++static void test_measurement(void){
++    float k;char expect[20];CH_Param=(CH_Calibration_Param_Str){10318,10318,20};
++    frame(10318);screen_reset();CH_Page_Init();CH_Page_Reflash();CHECK(saw("+1391.00")&&saw("+1348.00"));
++    frame(10418);screen_reset();CH_Page_Reflash();CHECK(GJ_Get_Valid_Scale(&k));
++    snprintf(expect,sizeof(expect),"%+.2f",1391.0f+100*k);CHECK(saw(expect));
++    tick+=1500;screen_reset();CH_Page_Reflash();CHECK(saw("NO SENSOR"));
++    frame(10418);screen_reset();CH_Page_Reflash();CHECK(saw(expect));
++    storage_state=0;screen_reset();CH_Page_Reflash();CHECK(saw("EEP ERROR"));storage_state=1;
++    frame(0);screen_reset();CH_Page_Reflash();CHECK(saw("AD ERROR "));
++    frame(10318);CH_Param.CZ_Ad=0;screen_reset();CH_Page_Reflash();CHECK(saw("CAL ERROR"));CH_Param.CZ_Ad=10318;
++    Data_Show_Percision=0;screen_reset();CH_Page_Init();CH_Page_Reflash();CHECK(saw("+1391.0")&&saw("+1348.0"));
++    puts("CG38 measurement: PASS; live values, precision, reentry, link loss/recovery, EEPROM/ADC/calibration errors");
++}
++int main(void){test_math();test_calibration();test_measurement();printf("CG38 CH tests: PASS %u checks\n",checks);return 0;}
++'''
++with tempfile.TemporaryDirectory(prefix='cg38_') as tmp:
++    d=Path(tmp);c=d/'ch.c';exe=d/('ch.exe' if os.name=='nt' else 'ch')
++    c.write_text(code,encoding='utf-8')
++    cmd=[os.environ.get('CC','cc'),'-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-fstack-protector-all','-fno-omit-frame-pointer']
++    if os.environ.get('HOST_SANITIZERS','1')!='0':cmd+=['-fsanitize=undefined']
++    cmd += [str(c),'-lm','-o',str(exe)]
++    subprocess.run(cmd,check=True)
++    subprocess.run([str(exe)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
+--- a/tests/CG_FIX_HOST_TESTS/test_cg.py
++++ b/tests/CG_FIX_HOST_TESTS/test_cg.py
+@@ -58,6 +58,10 @@
+ typedef struct { uint16_t GJ_1410_Ad, GJ_1435_Ad, GJ_1470_Ad; float temp; } GJ_Calibration_Param_Str;
+ extern CG_Calibration_Param_Str CG_Param;
+ extern GJ_Calibration_Param_Str GJ_Param;
++typedef struct { uint16_t CZ_Ad, HB_Ad; float temp; } CH_Calibration_Param_Str;
++extern CH_Calibration_Param_Str CH_Param;
++#define CH_CZ_REFERENCE_MM 1391.0f
++#define CH_HB_REFERENCE_MM 1348.0f
+ extern int8_t left_And_Righe_Status;
+ #define CG_RESULT_OK 0U
+ #define CG_RESULT_CAL_ERROR 1U
+@@ -125,6 +129,7 @@
+ 
+ CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
+ GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
++CH_Calibration_Param_Str CH_Param = {10318,10318,20};
+ int8_t left_And_Righe_Status = 1;
+ float POWER_Vol = 3.3f, GJ_Value = 0;
+ float ADC_GetVrefintVoltage(void) {return 3.3f;}
+--- a/变更日志.md
++++ b/变更日志.md
+@@ -1,9 +1,10 @@
+ # 数显轨距尺变更日志
+ 
+-当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG37 TEST / 2026-11-23** 主控测试版，配套 CG34 倾角板。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
++当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG38 TEST / 2026-11-23** 主控测试版，配套 CG34 倾角板。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
+ 
+ | 版本 | 主要变更 | 原始补丁 |
+ | --- | --- | --- |
++| [CG38 TEST](#cg38-test) | 查护实时换算，共用轨距滤波，独立基准、稳定采集和可靠保存 | [CG38 增量差异](docs/patches/CG38_20261123_查照护背优化.patch) |
+ | [CG37 TEST](#cg37-test) | 标定页面恢复实时 AD，并显示已采集均值 | [CG37 增量差异](docs/patches/CG37_20261123_标定实时AD显示.patch) |
+ | [CG36 TEST](#cg36-test) | 标定判稳放宽到 6 AD、均值漂移检查、等待原因提示 | [CG36 增量差异](docs/patches/CG36_20261123_标定判稳.patch) |
+ | [CG35 TEST](#cg35-test) | 两水平零点任意顺序时的超高分段连续性 | [CG35 增量差异](docs/patches/CG35_20261123_零区间连续性.patch) |
+@@ -20,11 +21,21 @@
+ 
+ - Keil 工程为 [STM32L151 主控](STM32L151/MDK-ARM/STM32L151.uvprojx)和 [QINGJIAOBAN 倾角板](QINGJIAOBAN/PROJECT/GuiJuChi.uvprojx)。
+ - [B31 EEPROM 量产与实机验收](docs/guides/B31_20261104_量产操作说明.md)、[CG32 双板 Keil 验证](docs/guides/CG32_20261116_Keil实机验证指南.md)和 [B3 EEPROM 备份与迁移历史指南](docs/guides/B3_20261103_EEPROM备份与迁移操作指南.md)。
+-- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用本工程的 CG33 超高专项验证、B31 EEPROM 与 B2 串口用例。
++- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用当前超高专项、CG38 查护专项、采样调度、B31 EEPROM 与 B2 双板串口用例。
+ 
+ ```sh
+ sh tests/CG32_HOST_TESTS/run_cg32_tests.sh
+ ```
++
++## CG38 TEST
++
++2026-11-23。修复查照/护背示值只显示初始化常量的问题，接入实时位移 AD。两项直接共用轨距已经滤波的 GJ_Ad、三点拟合斜率和一位/两位小数设置，各自以 1391/1348 mm 和独立 AD 为基准，不叠加测量滤波或死区。保留原超高修复及倾角板 100 ms 上报。
++
++查护标定取最近十帧稳定均值，页面持续显示 AD，采集后单列 CAP；只有最终 EEPROM 写入、读回、CRC 校验通过才显示“成功/SAVED”。两个基准 AD 同为 10318 可保存。未稳定或失联不推进采集，保存失败可重试；测量页显示断线、EEPROM、AD 或标定错误。更新数字时一次覆盖旧字符，提示文字核对现有字库。
++
++标定起始阈值为 0.03 mm 峰峰值、0.01 mm 前后半窗均值差，十帧跨度至少 800 ms、断档上限 250 ms。这些只用于标定采集，需要实机验证。共用机械比例/方向以及 ATGJ-1 接触姿态尚未确认，首次更新后须核对轨距参数、重新查护标定并在基准附近验证尺寸变化。相同 AD 保存后，旧固件的校验规则可能拒绝整份标定快照，回退需兼容修正。
++
++查护专项 98500 项检查、B31 EEPROM 357 项断言、B2 串口/判稳 91 项断言及原超高/双板功能回归通过。主控 Keil 全量编译零错误、零警告。本机 Windows GCC 功能回归无 UBSan，硬件精度和响应尚未验证。固件见 `firmware/CG38_TEST_20261123/STM32L151_CG38_TEST.hex`，具体流程、参数位置和回退说明见 [CG38 查照护背测试说明](docs/guides/CG38_20261123_查照护背测试说明.md)。
+ 
+ ## CG37 TEST
+ 

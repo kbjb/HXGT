@@ -20,6 +20,11 @@ void CG_Data_Init(void);
 float Get_CG_Value(int16_t CG_Ad,float temp);
 
 float Get_GJ_Value(uint16_t GJ_Ad,float temp);
+/* [CG38] Shared displacement scale, independent CH reference positions. */
+#define CH_CZ_REFERENCE_MM 1391.0f
+#define CH_HB_REFERENCE_MM 1348.0f
+uint8_t GJ_Get_Valid_Scale(float *scale);
+uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb);
 
 
 uint8_t Get_Driver_Power(uint16_t PowerAd);

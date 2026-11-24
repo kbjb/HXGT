@@ -408,27 +408,60 @@ void GJ_Calibration_Storage(void)
 
 void CH_Calibration_Storage(void)
 {
-    CH_Calibration_Status++;
-    switch(CH_Calibration_Status)
+    uint16_t captured_ad=0U;
+    float scale;
+    if (CH_Calibration_Status==0U || CH_Calibration_Status==2U ||
+        CH_Calibration_Status==4U)
     {
-        case 1:
-            CH_Param_Temp.CZ_Ad = GJ_Ad;
+        if (!Sensor_Data_Is_Fresh()) CH_Cal_Save_Failed=3U;
+        else if (!GJ_Get_Valid_Scale(&scale) ||
+                 !(Temp>=-40.0f && Temp<=100.0f)) CH_Cal_Save_Failed=2U;
+        else if (CH_Calibration_Status!=4U &&
+                 !Sensor_Get_Stable_GJ(&captured_ad,scale)) CH_Cal_Save_Failed=4U;
+        else CH_Cal_Save_Failed=0U;
+        if (CH_Cal_Save_Failed!=0U)
+        {
+            CH_Calibration_Status_History=0xFFU;
+            Beep_Ctrl(100,3);
+            return;
+        }
+    }
+    switch (CH_Calibration_Status)
+    {
+        case 0U:
+            CH_Param_Temp.CZ_Ad=captured_ad;
+            CH_Calibration_Status=1U;
             break;
-        case 3:
-            CH_Param_Temp.HB_Ad = GJ_Ad;
+        case 1U:
+            CH_Calibration_Status=2U;
+            Sensor_GJ_Stability_Reset();
             break;
-        case 5:
-            /* [B3] CH ADC/temperature now stored outside legacy node index. */
-            CH_Param_Temp.temp = Temp;
-            if (Eep_Save_CH_Calibration(CH_Param_Temp) == 0)
+        case 2U:
+            CH_Param_Temp.HB_Ad=captured_ad;
+            CH_Calibration_Status=3U;
+            break;
+        case 3U:
+            CH_Calibration_Status=4U; /* collected, not committed */
+            break;
+        case 4U:
+            CH_Param_Temp.temp=Temp;
+            if (Eep_Save_CH_Calibration(CH_Param_Temp)==0U)
             {
-                CH_Calibration_Status = 4;
+                CH_Cal_Save_Failed=1U;
+                CH_Calibration_Status_History=0xFFU;
                 Beep_Ctrl(100,3);
                 return;
             }
-            Beep_Ctrl(100,1);
+            CH_Cal_Save_Failed=0U;
+            CH_Calibration_Status=5U; /* only verified commit is success */
             break;
+        case 5U:
+            CH_Calibration_Status=6U;
+            break;
+        default:
+            return;
     }
+    Beep_Ctrl(100,1);
 }
 
 

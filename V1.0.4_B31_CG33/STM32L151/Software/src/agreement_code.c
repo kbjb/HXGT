@@ -1,4 +1,5 @@
 #include "agreement_head.h"
+#include <float.h>
 #include "param_head.h"
 #include "usart_head.h"
 #include "App_Eep.h"
@@ -73,6 +74,64 @@ uint8_t Sensor_Get_Stable_CG(int16_t *value)
     return 1U;
 }
 
+/* [CG38] This buffer is only used when capturing CH calibration. The
+ * measurement path consumes GJ_Ad directly and has no added smoothing. */
+static uint16_t CH_Capture_Samples[CH_CAL_STABLE_SAMPLES];
+static uint32_t CH_Capture_Ticks[CH_CAL_STABLE_SAMPLES];
+static uint8_t CH_Capture_Index=0U, CH_Capture_Count=0U;
+volatile uint32_t CH_Calibration_Range_AD=0U;
+volatile float CH_Calibration_Range_MM=0.0f, CH_Calibration_Trend_MM=0.0f;
+volatile CH_CAL_WAIT_STATE CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+
+void Sensor_GJ_Stability_Reset(void)
+{
+    CH_Capture_Index=0U;
+    CH_Capture_Count=0U;
+    CH_Calibration_Range_AD=0U;
+    CH_Calibration_Range_MM=0.0f;
+    CH_Calibration_Trend_MM=0.0f;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+}
+
+uint8_t Sensor_Get_Stable_GJ(uint16_t *value, float mm_per_ad)
+{
+    uint16_t lowest=UINT16_MAX, highest=0U;
+    uint32_t sum=0U, early=0U, late=0U, drift;
+    uint8_t i;
+    const uint8_t half=CH_CAL_STABLE_SAMPLES/2U;
+    float scale=mm_per_ad<0.0f ? -mm_per_ad : mm_per_ad;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_SCALE;
+    if (!(scale>0.0f && scale<=FLT_MAX)) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_LINK;
+    if (!Sensor_Data_Is_Fresh() ||
+        (uint32_t)(HAL_GetTick()-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+    if (value==NULL || CH_Capture_Count<CH_CAL_STABLE_SAMPLES) return 0U;
+    for (i=0U;i<CH_CAL_STABLE_SAMPLES;++i)
+    {
+        uint16_t sample=CH_Capture_Samples[(CH_Capture_Index+i)%CH_CAL_STABLE_SAMPLES];
+        if (sample<lowest) lowest=sample;
+        if (sample>highest) highest=sample;
+        sum+=sample;
+        if (i<half) early+=sample;
+        else late+=sample;
+    }
+    drift=late>=early ? late-early : early-late;
+    CH_Calibration_Range_AD=(uint32_t)highest-lowest;
+    CH_Calibration_Range_MM=(float)CH_Calibration_Range_AD*scale;
+    CH_Calibration_Trend_MM=(float)drift*scale/(float)half;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_TIME;
+    if ((uint32_t)(Sensor_Last_Valid_Tick-CH_Capture_Ticks[CH_Capture_Index])<
+        CH_CAL_STABLE_TIME_MS) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_NOISE;
+    if (CH_Calibration_Range_MM>CH_CAL_STABLE_RANGE_MM) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DRIFT;
+    if (CH_Calibration_Trend_MM>CH_CAL_MAX_MEAN_DRIFT_MM) return 0U;
+    *value=(uint16_t)((sum+CH_CAL_STABLE_SAMPLES/2U)/CH_CAL_STABLE_SAMPLES);
+    CH_Calibration_Wait_State=CH_CAL_CAPTURE_READY;
+    return 1U;
+}
+
 int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
 {
     UToI uToi_Temp;
@@ -135,6 +194,18 @@ uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
         CG_Capture_Ticks[CG_Capture_Index] = now;
         CG_Capture_Index = (uint8_t)((CG_Capture_Index + 1U) % CG_CAL_STABLE_SAMPLES);
         if (CG_Capture_Count < CG_CAL_STABLE_SAMPLES) CG_Capture_Count++;
+        if (Sensor_Frame_Seen &&
+            (uint32_t)(now-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS)
+            Sensor_GJ_Stability_Reset();
+        if (GJ_Ad==0U || GJ_Ad>0x7FFFU)
+            Sensor_GJ_Stability_Reset();
+        else
+        {
+            CH_Capture_Samples[CH_Capture_Index]=GJ_Ad;
+            CH_Capture_Ticks[CH_Capture_Index]=now;
+            CH_Capture_Index=(uint8_t)((CH_Capture_Index+1U)%CH_CAL_STABLE_SAMPLES);
+            if (CH_Capture_Count<CH_CAL_STABLE_SAMPLES) CH_Capture_Count++;
+        }
         Sensor_Last_Valid_Tick = now;
     }
     Sensor_Frame_Seen = 1;

@@ -205,6 +205,7 @@ extern uint8_t CG_Calibration_Status_History;
 extern uint8_t GJ_Calibration_Status;
 extern uint8_t GJ_Calibration_Status_History;
 
+extern uint8_t CH_Cal_Save_Failed; /* [CG38] */
 extern uint8_t CH_Calibration_Status;
 extern uint8_t CH_Calibration_Status_History;
 

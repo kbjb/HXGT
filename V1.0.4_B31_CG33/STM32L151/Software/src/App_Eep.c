@@ -126,10 +126,12 @@ static uint8_t ValidGJ(const GJ_Calibration_Param_Str *p)
              ValidTemp(p->temp)) ? 1U : 0U;
 }
 
+/* [CG38] Independent zero references may be equal; no CH slope is fitted.
+ * Keep the B3 layout/read compatibility. New writes also check ADC bounds. */
 static uint8_t ValidCH(const CH_Calibration_Param_Str *p)
 {
     return (p->CZ_Ad != 0xFFFFU && p->HB_Ad != 0xFFFFU &&
-            p->CZ_Ad != p->HB_Ad && ValidTemp(p->temp)) ? 1U : 0U;
+            ValidTemp(p->temp)) ? 1U : 0U;
 }
 
 static uint8_t ValidCal(const B3_CAL_DATA *p)
@@ -494,6 +496,8 @@ uint8_t Eep_Save_GJ_Calibration(GJ_Calibration_Param_Str data)
 uint8_t Eep_Save_CH_Calibration(CH_Calibration_Param_Str data)
 {
     B3_CAL_DATA staged;
+    if (data.CZ_Ad==0U || data.CZ_Ad>0x7FFFU ||
+        data.HB_Ad==0U || data.HB_Ad>0x7FFFU) return 0U;
     B3_CalibrationFromGlobals(&staged);
     staged.ch=data;
     return B3_SaveCalibration(&staged);

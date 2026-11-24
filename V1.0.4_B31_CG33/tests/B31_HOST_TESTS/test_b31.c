@@ -327,8 +327,39 @@ static void test_record_boundaries_and_meta_rollback(void)
     CHECK(Eep_Clear_Node()==0);
 }
 
+
+static void test_ch_equal_and_failure(void)
+{
+    CH_Calibration_Param_Str ch={10318,10318,23.0f};
+    unsigned before,cut;
+    reset_all(); CHECK(Eep_Data_Get()==1);
+    CHECK(Eep_Save_CH_Calibration(ch)==1);
+    CHECK(CH_Param.CZ_Ad==10318 && CH_Param.HB_Ad==10318);
+    before=writes; reset_globals(); CHECK(Eep_Data_Get()==1);
+    CHECK(writes==before && CH_Param.CZ_Ad==10318 && CH_Param.HB_Ad==10318);
+    CHECK(CH_Param.temp==23.0f);
+    ch.CZ_Ad=0; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
+    ch.CZ_Ad=0x8000; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
+    ch.CZ_Ad=10318; ch.HB_Ad=0xFFFF; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
+    ch.HB_Ad=10318; ch.temp=101; CHECK(Eep_Save_CH_Calibration(ch)==0 && writes==before);
+    ch.temp=23; ch.CZ_Ad=10400; wp=1;
+    CHECK(Eep_Save_CH_Calibration(ch)==0 && CH_Param.CZ_Ad==10318);
+    wp=0; reset_globals(); CHECK(Eep_Data_Get()==1 && CH_Param.CZ_Ad==10318);
+    for(cut=0;cut<3;cut++) {
+        reset_all(); CHECK(Eep_Data_Get()==1);
+        fail_after_writes=(int)writes+(int)cut;
+        CHECK(Eep_Save_CH_Calibration(ch)==0);
+        CHECK(CH_Param.CZ_Ad==10000 && CH_Param.HB_Ad==13000);
+        fail_after_writes=-1; reset_globals(); CHECK(Eep_Data_Get()==1);
+        CHECK(CH_Param.CZ_Ad==10000 && CH_Param.HB_Ad==13000);
+    }
+    CHECK(Eep_Save_CH_Calibration(ch)==1);
+    reset_globals(); CHECK(Eep_Data_Get()==1 && CH_Param.CZ_Ad==10400 && CH_Param.HB_Ad==10318);
+}
+
 int main(void)
 {
+    test_ch_equal_and_failure();
     test_driver();
     test_factory_init_once();
     test_nonblank_locked();

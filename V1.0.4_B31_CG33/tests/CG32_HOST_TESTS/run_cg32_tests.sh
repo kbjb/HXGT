@@ -11,6 +11,7 @@ cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-po
 UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
 python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
 python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
+python3 "$TESTS/CG38_HOST_TESTS/test_ch.py"
 sh "$TESTS/B31_HOST_TESTS/run_b31_tests.sh"
 sh "$TESTS/B2_HOST_TESTS/run_master_tests.sh"
 python3 "$TESTS/B2_HOST_TESTS/test_qing.py"

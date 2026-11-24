@@ -120,6 +120,54 @@ static void capture_window(const int16_t *samples, uint32_t period_ms)
     }
 }
 
+
+/* [CG38] Actual UART parser/window, including CRC, timing and tick wrap. */
+static void ch_window(const uint16_t *samples, uint32_t period)
+{
+    uint8_t frame[13]; unsigned i;
+    Sensor_GJ_Stability_Reset();
+    for(i=0;i<CH_CAL_STABLE_SAMPLES;i++) {
+        fake_tick+=period; u1(samples[i],0,20.0f,frame);
+        feed(&huart1,frame,13); UART_Process_Received(UART1_ID);
+    }
+}
+static void test_ch_capture(void)
+{
+    uint16_t ad=0, a[10]={10318,10318,10318,10318,10318,10318,10318,10318,10318,10318};
+    uint8_t f[13]; unsigned i;
+    ch_window(a,100);
+    CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10318);
+    CHECK(CH_Calibration_Wait_State==CH_CAL_CAPTURE_READY);
+    CHECK(Sensor_Get_Stable_GJ(&ad,-0.003f));
+    CHECK(!Sensor_Get_Stable_GJ(NULL,0.003f));
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.0f) && CH_Calibration_Wait_State==CH_CAL_WAIT_SCALE);
+    ch_window(a,88); CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_TIME);
+    ch_window(a,89); CHECK(Sensor_Get_Stable_GJ(&ad,0.003f));
+    fake_tick+=249; CHECK(Sensor_Get_Stable_GJ(&ad,0.003f));
+    fake_tick++; CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_LINK);
+    u1(10318,0,20,f); feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DATA);
+    for(i=0;i<10;i++) a[i]=(uint16_t)(10318+(i%2 ? 9 : 0));
+    ch_window(a,100); CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10323);
+    CHECK(CH_Calibration_Range_AD==9U);
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.004f) && CH_Calibration_Wait_State==CH_CAL_WAIT_NOISE);
+    for(i=0;i<10;i++) a[i]=(uint16_t)(10318+(i>=5 ? 4 : 0));
+    ch_window(a,100); CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DRIFT);
+    for(i=0;i<10;i++) a[i]=10318;
+    ch_window(a,100); Sensor_GJ_Stability_Reset();
+    u1(10318,0,20,f); f[10]^=1;
+    for(i=0;i<10;i++) {fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);}
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
+    ch_window(a,100); u1(0,0,20,f); fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f) && CH_Calibration_Wait_State==CH_CAL_WAIT_DATA);
+    ch_window(a,100); u1(0x8000,0,20,f); fake_tick+=100; feed(&huart1,f,13); UART_Process_Received(UART1_ID);
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
+    fake_tick=UINT32_MAX-450U; ch_window(a,100);
+    CHECK(Sensor_Get_Stable_GJ(&ad,0.003f) && ad==10318);
+    Sensor_GJ_Stability_Reset();
+    CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
+}
+
 int main(void) {
     uint8_t f[256], g[256], dat[256];
     unsigned len; size_t before;
@@ -318,5 +366,7 @@ int main(void) {
         (unsigned long)UART_Get_Bad_Frame_Count(UART1_ID),
         (unsigned long)UART_Get_Dropped_Frame_Count(UART1_ID),
         (unsigned long)UART_Get_Bad_Frame_Count(UART2_ID));
+    test_ch_capture();
+    printf("CG38 UART/capture checks included: %u assertions total\n",tests);
     return 0;
 }

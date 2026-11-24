@@ -40,3 +40,4 @@ stm32l151\algorithm_code.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\math.h
 stm32l151\algorithm_code.o: ../Software/inc/adc_head.h
 stm32l151\algorithm_code.o: ../Software/inc/cg_cal_guard.h
 stm32l151\algorithm_code.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\stdlib.h
+stm32l151\algorithm_code.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\float.h

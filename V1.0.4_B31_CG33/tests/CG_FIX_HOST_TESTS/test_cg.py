@@ -58,6 +58,10 @@ typedef struct { int16_t CG_Zero_Left_Ad, CG_Max_Left_Ad, CG_Zero_Right_Ad, CG_M
 typedef struct { uint16_t GJ_1410_Ad, GJ_1435_Ad, GJ_1470_Ad; float temp; } GJ_Calibration_Param_Str;
 extern CG_Calibration_Param_Str CG_Param;
 extern GJ_Calibration_Param_Str GJ_Param;
+typedef struct { uint16_t CZ_Ad, HB_Ad; float temp; } CH_Calibration_Param_Str;
+extern CH_Calibration_Param_Str CH_Param;
+#define CH_CZ_REFERENCE_MM 1391.0f
+#define CH_HB_REFERENCE_MM 1348.0f
 extern int8_t left_And_Righe_Status;
 #define CG_RESULT_OK 0U
 #define CG_RESULT_CAL_ERROR 1U
@@ -125,6 +129,7 @@ static void check_zero_edges(int16_t left_zero, int16_t right_zero,
 
 CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
 GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
+CH_Calibration_Param_Str CH_Param = {10318,10318,20};
 int8_t left_And_Righe_Status = 1;
 float POWER_Vol = 3.3f, GJ_Value = 0;
 float ADC_GetVrefintVoltage(void) {return 3.3f;}
