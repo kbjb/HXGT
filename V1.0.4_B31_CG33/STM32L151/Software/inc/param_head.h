@@ -165,6 +165,7 @@ extern float   GJ_Value;
 extern float   CZ_Value;
 extern float   HB_Value;
 extern uint8_t Set_Time[6] ;
+extern uint8_t Set_Time_Error; /* [CG39] 1=read,2=invalid,3=write */
     
 extern uint8_t Set_Time_Select;
 extern uint8_t Set_Time_Select_History;

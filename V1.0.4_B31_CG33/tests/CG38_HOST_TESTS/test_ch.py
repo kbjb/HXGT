@@ -71,13 +71,14 @@ void Beep_Ctrl(unsigned ms,unsigned n){(void)ms;beeps=n;}
 static unsigned storage_state=1,page_id=0;
 unsigned Eep_Get_Storage_State(void){return storage_state;}
 typedef struct {unsigned year,month,day,hour,minute;} PCF8563_TimeTypeDef;
-static int hi2c2;
+static uint8_t Battery_Force_Redraw;
+void Measurement_Battery_Refresh(void){}
+void Measurement_Time_Refresh(void){}
 void PCF8563_GetTime(void *h,PCF8563_TimeTypeDef *t){(void)h;*t=(PCF8563_TimeTypeDef){26,11,23,12,0};}
 void set_PageId(unsigned p){page_id=p;}
 static char texts[100][40];static unsigned ntexts=0,clears=0;
 void OLED_Clear(void){clears++;}
 static void rect(unsigned x,unsigned y,unsigned w,unsigned h){CHECK(x+w<=128 && y+h<=8);}
-static uint8_t power_4_ico[16];
 void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,uint8_t *data){(void)data;rect(x,y,w,(h+7U)/8U);}
 void OLED_PrintString(unsigned x,unsigned y,char *s,unsigned font){
     rect(x,y,(unsigned)strlen(s)*(font==FONT_8X16?8U:6U),font==FONT_8X16?2U:1U);

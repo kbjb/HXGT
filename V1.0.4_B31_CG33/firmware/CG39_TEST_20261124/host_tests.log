@@ -1,0 +1,21 @@
+Windows GCC functional checks; UBSan unavailable, sanitizer flag removed explicitly.
+tests/CG39_HOST_TESTS/test_ui.py
+CG39 calendar: PASS; 2000..2099 date/weekday oracle, all field-byte inputs, wrap, leap-year and month clamping
+CG39 RTC/editor: PASS; register encoding, invalid BCD/date/VL, I2C failures, complete save fields, error/retry, 999 suffix erase, selection and OLED bounds
+CG39 battery: PASS; shared cached icons, immediate page redraw, five-second sampling, 500 ms blinking, recovery and tick wrap
+CG39 UI tests: PASS 112643 checks
+tests/CG38_HOST_TESTS/test_ch.py
+CG38 math: PASS; full positive ADC sweep, shared gauge scale, independent/equal zeros, signed deltas, reversed slope, invalid data
+CG38 calibration: PASS; live vs captured AD, window reset, equal zeros, save confirmation/failure/retry, stale/temperature guards, OLED bounds
+CG38 measurement: PASS; live values, precision, reentry, link loss/recovery, EEPROM/ADC/calibration errors
+CG38 CH tests: PASS 98484 checks
+tests/CG_FIX_HOST_TESTS/test_cg.py
+CG35 zero edges: PASS; full 16-bit sweeps, both zero orders, endpoints, direction, temperature
+CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference
+CG key: PASS; save not premature, failed/implausible saves rejected
+CG37 calibration display: PASS; live AD on 10 states, full signed range, saved means, wait reasons, 128x64 nonoverlap
+B3.1 EEPROM production tests: PASS 357 assertions; 64KiB blank scan, init recovery, A/B persistence, 100 records, nonblank lock, I2C/WP/powerloss, disjoint layout.
+B2 HOST: PASS 72 assertions; UART1 bad=181 dropped=1; UART2 bad=3; 50,000 noise bytes; no IRQ TX
+CG38 UART/capture checks included: 91 assertions total
+CG integration static checks: PASS; EEPROM production switches unchanged
+ALL CG39 AND MEASUREMENT REGRESSIONS PASSED

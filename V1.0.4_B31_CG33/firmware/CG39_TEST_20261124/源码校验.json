@@ -1,0 +1,18 @@
+{
+  "STM32L151/Software/inc/param_head.h": "95b8470915ef1396357fa6b03c8cf521077173dc9d340f9d7c0097ec90973c6b",
+  "STM32L151/Software/inc/pcf8563_head.h": "db4df5fb2f2261cb4902e91371c2c6a39166fa1b83ab50247d57cca69cb8a648",
+  "STM32L151/Software/src/App_code.c": "e8a00af4b805d8d40d7ebad2af38609e7e59aead2fdd4bb323f271e74bc2f31a",
+  "STM32L151/Software/src/App_key.c": "13a1855b85dc72ae03202f95635e7d1a31221a7093a9876c4b1f0db6fd3d91e6",
+  "STM32L151/Software/src/param_code.c": "f32c5b11e563deee0fd53da3ab2e126b5ffca838d560baad73cd722a012b5ea6",
+  "STM32L151/Software/src/pcf8563_code.c": "14401cc3a097d53a8ac783d89da1ae985a75a05a2157e916a86ff23ca97b1042",
+  "docs/guides/CG39_20261124_电量与时间设置测试说明.md": "0d6699b7f5b355bce46459dfecb0dc854e5d10792aacad93fe2538f154950eba",
+  "tests/CG32_HOST_TESTS/run_cg32_tests.sh": "a8c984063d280acd2db0a854a9c0918a82d19bf4779fbce2a8c3c538c7a217fd",
+  "tests/CG38_HOST_TESTS/test_ch.py": "08def741270322cca427da02d4cf699d67d933ccffc616ea4a8fd0f0da786217",
+  "tests/CG39_HOST_TESTS/test_ui.py": "7fd0c92605a84859899d8778df2d3c0ebe7dc45748a9b98c1cf117dcb718ce63",
+  "变更日志.md": "cc1a8b3f7dad5fe954fbee6c0e954a59ce62c16d503ba0328ef0b35c0195388a",
+  "STM32L151/MDK-ARM/STM32L151.uvprojx": "8d3b0aa396a318cc125885cc44ddc633a20b380a30591a4a49604f102d3a284b",
+  "STM32L151/Software/src/Algorithm_code.c": "4a3dbd497171ac5d6f47690743f10326b08c5e98f46d09c297bfa4f3a0b60c94",
+  "STM32L151/Software/src/App_Eep.c": "61e4cff41046995653a096e0b4da62a42805baf7bc241b13c538082633fab763",
+  "QINGJIAOBAN/USER/main.c": "43814a7d84c2cfa3f46224a4563e693a613dd200bbb2f11ea7fd61ad365f1643",
+  "QINGJIAOBAN/USER/main_head.h": "b627946f6b4e5bf9baf1f77a48d1a9d61cf32e4722f86236b84961d72b6796a4"
+}

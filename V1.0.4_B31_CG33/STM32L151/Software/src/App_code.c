@@ -30,16 +30,81 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG38 TEST",FONT_8X16);
+    OLED_PrintString(40,4,"CG39 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
     }
 }
 
+extern I2C_HandleTypeDef hi2c2;
+/* [CG39] Shared measurement-page battery state. Sampling is independent
+ * from low-battery blinking, and entering a page redraws the cached level. */
+#define BATTERY_SAMPLE_PERIOD_MS 5000U
+#define BATTERY_BLINK_PERIOD_MS   500U
+static uint8_t Battery_Initialized=0U, Battery_Level=0U;
+static uint8_t Battery_Visible=1U, Battery_Force_Redraw=1U;
+static uint8_t Battery_Last_Icon=0xFFU;
+static uint32_t Battery_Sample_Tick=0U, Battery_Blink_Tick=0U;
+
+static void Measurement_Battery_Refresh(void)
+{
+    uint32_t now=HAL_GetTick();
+    uint8_t redraw=Battery_Force_Redraw;
+    uint8_t icon;
+    const char *bitmap;
+    if (!Battery_Initialized || (uint32_t)(now-Battery_Sample_Tick)>=BATTERY_SAMPLE_PERIOD_MS)
+    {
+        uint8_t previous=Battery_Level;
+        Battery_Level=Get_Driver_Power(ADC_ReadChannel9());
+        Battery_Sample_Tick=now;
+        if (!Battery_Initialized || previous!=Battery_Level)
+        {
+            Battery_Visible=1U;
+            Battery_Blink_Tick=now;
+            redraw=1U;
+        }
+        Battery_Initialized=1U;
+    }
+    if (Battery_Level==0U && (uint32_t)(now-Battery_Blink_Tick)>=BATTERY_BLINK_PERIOD_MS)
+    {
+        uint32_t periods=(uint32_t)(now-Battery_Blink_Tick)/BATTERY_BLINK_PERIOD_MS;
+        if ((periods&1U)!=0U) Battery_Visible=1U-Battery_Visible;
+        Battery_Blink_Tick+=periods*BATTERY_BLINK_PERIOD_MS;
+    }
+    icon=Battery_Level==0U && !Battery_Visible ? 5U : Battery_Level;
+    if (redraw || icon!=Battery_Last_Icon)
+    {
+        switch(icon)
+        {
+            case 0U: bitmap=power_0_ico; break;
+            case 1U: bitmap=power_1_ico; break;
+            case 2U: bitmap=power_2_ico; break;
+            case 3U: bitmap=power_3_ico; break;
+            case 4U: bitmap=power_4_ico; break;
+            default: bitmap=power_n_ico; break;
+        }
+        OLED_ShowImage(105,0,16,8,(uint8_t *)bitmap);
+        Battery_Last_Icon=icon;
+    }
+    Battery_Force_Redraw=0U;
+}
+
+static void Measurement_Time_Refresh(void)
+{
+    PCF8563_TimeTypeDef time;
+    char text[20];
+    if (PCF8563_GetTime(&hi2c2,&time)==HAL_OK && time.century==0U)
+        snprintf(text,sizeof(text),"%02u/%02u/%02u %02u:%02u",(unsigned)time.year,
+                 (unsigned)time.month,(unsigned)time.day,(unsigned)time.hour,(unsigned)time.minute);
+    else snprintf(text,sizeof(text),"--/--/-- --:--");
+    OLED_PrintString(5,0,text,FONT_6X8);
+}
+
 /*************************主界面***************************/
 void Main_Page_Init(void)
 {
+    Battery_Force_Redraw=1U;
     Main_Values_Need_Redraw = 1U;
     CG_Display_Status_History = 0xFFU;
     CG_Value_History = 0;
@@ -53,10 +118,6 @@ void Main_Page_Init(void)
 
 
 extern I2C_HandleTypeDef hi2c2;
-static int8_t  Power_0_Ico_Show_Timer_Status = 0;
-static uint16_t Power_Ico_Show_Timer_Freq = 5000;
-static uint32_t Power_Ico_Show_Timer_History = 0;
-static uint32_t Power_Ico_Show_Timer_Now = 0;
 void Main_Page_Reflash(void)
 {
     char buffer[20];
@@ -113,47 +174,8 @@ void Main_Page_Reflash(void)
     }
 
     Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
-    /*显示时间*/
-    //获取时间数据
-    PCF8563_TimeTypeDef time;
-    PCF8563_GetTime(&hi2c2,&time);
-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
-    OLED_PrintString(5,0,buffer,FONT_6X8);
-    
-    
-    Power_Ico_Show_Timer_Now =HAL_GetTick();
-    if((Power_Ico_Show_Timer_Now - Power_Ico_Show_Timer_History)>Power_Ico_Show_Timer_Freq)
-    {
-        uint8_t Driver_Power_Level = Get_Driver_Power(ADC_ReadChannel9());
-        /*显示电量信息*/
-        if(Driver_Power_Level == 0)
-        {
-            Power_Ico_Show_Timer_Freq = 500;
-            Power_0_Ico_Show_Timer_Status = 1-Power_0_Ico_Show_Timer_Status;
-            if(Power_0_Ico_Show_Timer_Status == 0)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_0_ico);
-            else
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_n_ico);
-        }
-        else
-        {
-            Power_Ico_Show_Timer_Freq = 5000;
-            if(Driver_Power_Level == 4)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
-            else if(Driver_Power_Level == 3)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_3_ico);
-            else if(Driver_Power_Level == 2)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_2_ico);
-            else
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_1_ico);
-        }
-        Power_Ico_Show_Timer_History = Power_Ico_Show_Timer_Now;
-    }
-    
-    
-    
-    
-    /*显示目标提示*/
+    Measurement_Time_Refresh();
+    Measurement_Battery_Refresh();
     if(Goal_Set_Status == 1)
     {
         OLED_PrintString(5,1,"MUBIAO",FONT_6X8);
@@ -195,6 +217,7 @@ static uint8_t CH_Display_Status_History=0xFFU;
 static uint8_t CH_Values_Need_Redraw=1U;
 void CH_Page_Init(void)
 {
+    Battery_Force_Redraw=1U;
     CZ_Value_S = 0,HB_Value_S = 0;
     CH_Display_Status_History=0xFFU;
     CH_Values_Need_Redraw=1U;
@@ -251,12 +274,8 @@ void CH_Page_Reflash(void)
         }
     }
     CH_Values_Need_Redraw=0U;
-    PCF8563_TimeTypeDef time;
-    PCF8563_GetTime(&hi2c2,&time);
-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
-    OLED_PrintString(5,0,buffer,FONT_6X8);
-    /*显示电量数据*/
-    OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
+    Measurement_Time_Refresh();
+    Measurement_Battery_Refresh();
 }
 
 /************************菜单选择界面***************************/
@@ -327,71 +346,53 @@ void Menu_Page_Reflash(void)
 void Time_Set_Page_Init(void)
 {
     PCF8563_TimeTypeDef timeT;
-    PCF8563_GetTime(&hi2c2,&timeT);
+    uint8_t i;
+    static const uint8_t fallback[6]={0,1,1,0,0,0};
+    Set_Time_Error=0U;
+    for (i=0U;i<6U;++i) Set_Time[i]=fallback[i];
+    if (PCF8563_GetTime(&hi2c2,&timeT)==HAL_OK && timeT.century==0U)
+    {
+        Set_Time[0]=timeT.year; Set_Time[1]=timeT.month; Set_Time[2]=timeT.day;
+        Set_Time[3]=timeT.hour; Set_Time[4]=timeT.minute; Set_Time[5]=timeT.second;
+    }
+    else Set_Time_Error=1U;
+    PCF8563_NormalizeEdit(Set_Time);
     OLED_PrintString(9,2,"Y",FONT_8X16);
     OLED_PrintString(49,2,"M",FONT_8X16);
     OLED_PrintString(89,2,"D",FONT_8X16);
     OLED_PrintString(9,5,"h",FONT_8X16);
     OLED_PrintString(49,5,"m",FONT_8X16);
     OLED_PrintString(89,5,"s",FONT_8X16);
-    
-    Set_Time[0]     = timeT.year;
-    Set_Time[1]     = timeT.month;
-    Set_Time[2]     = timeT.day;
-    Set_Time[3]     = timeT.hour;
-    Set_Time[4]     = timeT.minute;
-    Set_Time[5]     = timeT.second;
-    Set_Time_Select = 0;
-    Set_Time_Select_History = 1;
-    
+    Set_Time_Select=0U;
+    Set_Time_Select_History=0xFFU;
 }
 
 void Time_Set_Page_Reflash(void)
 {
-    char buffer[8]; /* [B1] Time fields have room for unexpected values. */
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[0]);
-    OLED_PrintString(20,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[1]);
-    OLED_PrintString(60,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[2]);
-    OLED_PrintString(100,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[3]);
-    OLED_PrintString(20,5,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[4]);
-    OLED_PrintString(60,5,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[5]);
-    OLED_PrintString(100,5,buffer,FONT_8X16);
-    if(Set_Time_Select_History!=Set_Time_Select)
+    static const uint8_t xpos[6]={20,60,100,20,60,100};
+    static const uint8_t ypos[6]={2,2,2,5,5,5};
+    uint8_t i;
+    char text[4];
+    const char *status="20YY             ";
+    PCF8563_NormalizeEdit(Set_Time);
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    for (i=0U;i<6U;++i)
     {
-        switch(Set_Time_Select)
-        {
-            case 0:
-                OLED_PrintLine(100,116,7,0x00);
-                OLED_PrintLine(20,36,4,0x01);
-                break;
-            case 1:
-                OLED_PrintLine(20,36,4,0x00);
-                OLED_PrintLine(60,76,4,0x01);
-                break;
-            case 2:
-                OLED_PrintLine(60,76,4,0x00);
-                OLED_PrintLine(100,116,4,0x01);
-                break;
-            case 3:
-                OLED_PrintLine(100,116,4,0x00);
-                OLED_PrintLine(20,36,7,0x01);
-                break;
-            case 4:
-                OLED_PrintLine(20,36,7,0x00);
-                OLED_PrintLine(60,76,7,0x01);
-                break;
-            case 5:
-                OLED_PrintLine(60,76,7,0x00);
-                OLED_PrintLine(100,116,7,0x01);
-                break;
-        }
-        Set_Time_Select_History = Set_Time_Select;
+        /* Two digits plus one space removes any old third digit (e.g. 999).
+         * Day/seconds end at x=123, within the 128 px display. */
+        snprintf(text,sizeof(text),"%02u ",(unsigned)(Set_Time[i]%100U));
+        OLED_PrintString(xpos[i],ypos[i],text,FONT_8X16);
     }
+    if (Set_Time_Select_History!=Set_Time_Select)
+    {
+        for (i=0U;i<6U;++i)
+            OLED_PrintLine(xpos[i],xpos[i]+16U,ypos[i]+2U,i==Set_Time_Select ? 0x01 : 0x00);
+        Set_Time_Select_History=Set_Time_Select;
+    }
+    if (Set_Time_Error==1U) status="RTC READ ERROR   ";
+    else if (Set_Time_Error==2U) status="INVALID DATE     ";
+    else if (Set_Time_Error==3U) status="RTC WRITE ERROR  ";
+    OLED_PrintString(5,0,(char *)status,FONT_6X8);
 }
 
 /*************************目标设置界面***************************/

@@ -45,6 +45,13 @@ typedef struct {
 
 
 /* º¯ÊýÉùÃ÷ */
+/* [CG39] Application century convention: 0=2000..2099, 1=2100..2199.
+ * Editing on the six-field page is explicitly restricted to 20xx. */
+uint8_t PCF8563_DaysInMonth(uint8_t year,uint8_t month,uint8_t century);
+uint8_t PCF8563_TimeIsValid(const PCF8563_TimeTypeDef *time);
+uint8_t PCF8563_Weekday(uint8_t year,uint8_t month,uint8_t day);
+void PCF8563_NormalizeEdit(uint8_t fields[6]);
+
 uint8_t PCF8563_Init(I2C_HandleTypeDef *hi2c);
 uint8_t PCF8563_SetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time);
 uint8_t PCF8563_GetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time);

@@ -74,8 +74,15 @@ void GoTo_Ch_Page(void)
 
 void Reduce_Time_For_Time_Select(void)
 {
-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == 0?Time_Set_Threshold[Set_Time_Select]:Set_Time[Set_Time_Select]-1;
+    static const uint8_t maxima[6]={99,12,31,23,59,59};
+    uint8_t minimum,maximum;
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    PCF8563_NormalizeEdit(Set_Time);
+    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
+    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
+    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]<=minimum) ? maximum : Set_Time[Set_Time_Select]-1U;
+    PCF8563_NormalizeEdit(Set_Time);
+    Set_Time_Error=0U;
 }
 
 void Reduce_Goal_For_Goal_Select(void)
@@ -122,8 +129,15 @@ void Reduce_Calibration_For_Menu_Select(void)
 
 void InCrease_Time_For_Time_Select(void)
 {
-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == Time_Set_Threshold[Set_Time_Select]?0:Set_Time[Set_Time_Select]+1;
+    static const uint8_t maxima[6]={99,12,31,23,59,59};
+    uint8_t minimum,maximum;
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    PCF8563_NormalizeEdit(Set_Time);
+    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
+    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
+    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]>=maximum) ? minimum : Set_Time[Set_Time_Select]+1U;
+    PCF8563_NormalizeEdit(Set_Time);
+    Set_Time_Error=0U;
 }
 void InCrease_Goal_For_Goal_Select(void)
 {
@@ -181,7 +195,7 @@ void Change_Menu_Menu_Id(void)
 
 void Change_Time_Select_Id(void)
 {
-    Set_Time_Select = Set_Time_Select == 5?0:Set_Time_Select+1;
+    Set_Time_Select=(Set_Time_Select>=5U) ? 0U : Set_Time_Select+1U;
 }
 
 void Change_Goal_Set_Select_Id(void)
@@ -284,20 +298,28 @@ void Password_Set_Confirm(void)
 extern I2C_HandleTypeDef hi2c2;
 void Change_Time_For_Set_Time(void)
 {
-    PCF8563_TimeTypeDef time;
-    time.year = Set_Time[0];
-    time.month = Set_Time[1];
-    time.day = Set_Time[2];
-    time.hour = Set_Time[3];
-    time.minute = Set_Time[4];
-    time.second = Set_Time[5];
-    if(PCF8563_SetTime(&hi2c2,&time) == HAL_OK)
+    PCF8563_TimeTypeDef time={0};
+    time.year=Set_Time[0]; time.month=Set_Time[1]; time.day=Set_Time[2];
+    time.hour=Set_Time[3]; time.minute=Set_Time[4]; time.second=Set_Time[5];
+    time.century=0U; /* Six-field editor uses 2000..2099. */
+    time.weekday=PCF8563_Weekday(time.year,time.month,time.day);
+    if (!PCF8563_TimeIsValid(&time))
     {
+        Set_Time_Error=2U;
+        Beep_Ctrl(100,3);
+        return;
+    }
+    if (PCF8563_SetTime(&hi2c2,&time)==HAL_OK)
+    {
+        Set_Time_Error=0U;
         Beep_Ctrl(100,1);
         set_PageId(page_menu);
     }
     else
+    {
+        Set_Time_Error=3U;
         Beep_Ctrl(100,3);
+    }
 }
 
 /*存储键相关功能*/

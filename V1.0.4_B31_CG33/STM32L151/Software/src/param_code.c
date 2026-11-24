@@ -19,6 +19,7 @@ float   GJ_Value = 1435.11;                     //主界面   当前的轨距示值
 float   CZ_Value = 0.0f;                     //查照数据
 float   HB_Value = 0.0f;                    //护背数据
 
+uint8_t Set_Time_Error=0U; /* [CG39] */
 uint8_t Set_Time[6]    = {24,8,5,1,59,32};      //时间设置界面 时间输入缓存数组分别对应 年 月 日 时 分 秒
 uint8_t Set_Time_Select = 0;                    //时间设置界面 当前选择要修改的时间项
 uint8_t Set_Time_Select_History = 1;            //时间设置界面 上一次选择要修改的时间项
