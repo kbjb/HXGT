@@ -1,4 +1,5 @@
 #include "agreement_head.h"
+#include <float.h>
 #include "param_head.h"
 #include "usart_head.h"
 #include "App_Eep.h"
@@ -10,11 +11,125 @@ static volatile uint8_t Sensor_Frame_Seen = 0;
 
 uint8_t Sensor_Data_Is_Fresh(void)
 {
-    /* Foreground-only: once expired, stay expired until a new valid frame. */
-    if (Sensor_Frame_Seen &&
-        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= SENSOR_LINK_TIMEOUT_MS)
-        Sensor_Frame_Seen = 0U;
-    return Sensor_Frame_Seen;
+    return (uint8_t)(Sensor_Frame_Seen &&
+        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) < SENSOR_LINK_TIMEOUT_MS);
+}
+
+
+static int16_t CG_Capture_Samples[CG_CAL_STABLE_SAMPLES];
+static uint32_t CG_Capture_Ticks[CG_CAL_STABLE_SAMPLES];
+static uint8_t CG_Capture_Index = 0U;
+static uint8_t CG_Capture_Count = 0U;
+volatile int32_t CG_Calibration_Range_AD = 0;
+volatile int32_t CG_Calibration_Trend_AD = 0;
+volatile CG_CAL_WAIT_STATE CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+
+void Sensor_CG_Stability_Reset(void)
+{
+    CG_Capture_Count = 0U;
+    CG_Capture_Index = 0U;
+    CG_Calibration_Range_AD = 0;
+    CG_Calibration_Trend_AD = 0;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+}
+
+uint8_t Sensor_Get_Stable_CG(int16_t *value)
+{
+    int16_t lowest = INT16_MAX, highest = INT16_MIN;
+    int32_t sum = 0, early_sum = 0, late_sum = 0, drift_sum;
+    uint8_t i;
+    const uint8_t half = CG_CAL_STABLE_SAMPLES / 2U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DATA;
+    if (value == NULL || CG_Capture_Count < CG_CAL_STABLE_SAMPLES) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_LINK;
+    if (!Sensor_Data_Is_Fresh() ||
+        (uint32_t)(HAL_GetTick() - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
+        return 0U;
+    /* CG_Capture_Index points at the oldest sample in a full ring. */
+    for (i = 0U; i < CG_CAL_STABLE_SAMPLES; ++i)
+    {
+        int16_t sample = CG_Capture_Samples[(CG_Capture_Index + i) % CG_CAL_STABLE_SAMPLES];
+        if (sample < lowest) lowest = sample;
+        if (sample > highest) highest = sample;
+        sum += sample;
+        if (i < half) early_sum += sample;
+        else late_sum += sample;
+    }
+    CG_Calibration_Range_AD = (int32_t)highest - (int32_t)lowest;
+    drift_sum = late_sum - early_sum;
+    if (drift_sum < 0) drift_sum = -drift_sum;
+    CG_Calibration_Trend_AD = (drift_sum + half - 1U) / half;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_TIME;
+    if ((uint32_t)(Sensor_Last_Valid_Tick - CG_Capture_Ticks[CG_Capture_Index]) <
+        CG_CAL_STABLE_TIME_MS) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_NOISE;
+    if (CG_Calibration_Range_AD > CG_CAL_STABLE_RANGE_AD) return 0U;
+    CG_Calibration_Wait_State = CG_CAL_WAIT_DRIFT;
+    /* Compare sums before division so 2.2 AD cannot truncate to 2 AD. */
+    if (drift_sum > CG_CAL_MAX_MEAN_DRIFT_AD * half) return 0U;
+    sum += sum >= 0 ? (int32_t)CG_CAL_STABLE_SAMPLES / 2 :
+                    -(int32_t)CG_CAL_STABLE_SAMPLES / 2;
+    *value = (int16_t)(sum / (int32_t)CG_CAL_STABLE_SAMPLES);
+    CG_Calibration_Wait_State = CG_CAL_CAPTURE_READY;
+    return 1U;
+}
+
+/* [CG38] This buffer is only used when capturing CH calibration. The
+ * measurement path consumes GJ_Ad directly and has no added smoothing. */
+static uint16_t CH_Capture_Samples[CH_CAL_STABLE_SAMPLES];
+static uint32_t CH_Capture_Ticks[CH_CAL_STABLE_SAMPLES];
+static uint8_t CH_Capture_Index=0U, CH_Capture_Count=0U;
+volatile uint32_t CH_Calibration_Range_AD=0U;
+volatile float CH_Calibration_Range_MM=0.0f, CH_Calibration_Trend_MM=0.0f;
+volatile CH_CAL_WAIT_STATE CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+
+void Sensor_GJ_Stability_Reset(void)
+{
+    CH_Capture_Index=0U;
+    CH_Capture_Count=0U;
+    CH_Calibration_Range_AD=0U;
+    CH_Calibration_Range_MM=0.0f;
+    CH_Calibration_Trend_MM=0.0f;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+}
+
+uint8_t Sensor_Get_Stable_GJ(uint16_t *value, float mm_per_ad)
+{
+    uint16_t lowest=UINT16_MAX, highest=0U;
+    uint32_t sum=0U, early=0U, late=0U, drift;
+    uint8_t i;
+    const uint8_t half=CH_CAL_STABLE_SAMPLES/2U;
+    float scale=mm_per_ad<0.0f ? -mm_per_ad : mm_per_ad;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_SCALE;
+    if (!(scale>0.0f && scale<=FLT_MAX)) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_LINK;
+    if (!Sensor_Data_Is_Fresh() ||
+        (uint32_t)(HAL_GetTick()-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DATA;
+    if (value==NULL || CH_Capture_Count<CH_CAL_STABLE_SAMPLES) return 0U;
+    for (i=0U;i<CH_CAL_STABLE_SAMPLES;++i)
+    {
+        uint16_t sample=CH_Capture_Samples[(CH_Capture_Index+i)%CH_CAL_STABLE_SAMPLES];
+        if (sample<lowest) lowest=sample;
+        if (sample>highest) highest=sample;
+        sum+=sample;
+        if (i<half) early+=sample;
+        else late+=sample;
+    }
+    drift=late>=early ? late-early : early-late;
+    CH_Calibration_Range_AD=(uint32_t)highest-lowest;
+    CH_Calibration_Range_MM=(float)CH_Calibration_Range_AD*scale;
+    CH_Calibration_Trend_MM=(float)drift*scale/(float)half;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_TIME;
+    if ((uint32_t)(Sensor_Last_Valid_Tick-CH_Capture_Ticks[CH_Capture_Index])<
+        CH_CAL_STABLE_TIME_MS) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_NOISE;
+    if (CH_Calibration_Range_MM>CH_CAL_STABLE_RANGE_MM) return 0U;
+    CH_Calibration_Wait_State=CH_CAL_WAIT_DRIFT;
+    if (CH_Calibration_Trend_MM>CH_CAL_MAX_MEAN_DRIFT_MM) return 0U;
+    *value=(uint16_t)((sum+CH_CAL_STABLE_SAMPLES/2U)/CH_CAL_STABLE_SAMPLES);
+    CH_Calibration_Wait_State=CH_CAL_CAPTURE_READY;
+    return 1U;
 }
 
 int16_t Unsigned_Six_To_Signed_Six(uint16_t data)
@@ -56,7 +171,6 @@ uint8_t Get_Add_Verify(uint8_t *buffp,uint8_t len)
 
 uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
 {
-    uint32_t rx_tick;
     /* [B1] Exactly 13 bytes are needed before any fixed-position read. */
     if(data == NULL || length != 13) return 0;
     if(data[0] != 0x5A || data[length-2]!=0x0D || data[length-1]!=0x0A)
@@ -65,22 +179,35 @@ uint8_t Sensor_Data_Receive_For_Uart1(uint8_t* data, uint16_t length)
         return 1;
     if(data[length-3] != Get_Add_Verify(data,length-3))
         return 2;
-    /* A busy foreground (e.g. EEPROM scan during boot) may serve the
-     * mailbox long after RX. Acknowledge a well-formed stale frame without
-     * publishing its data or pretending the sensor just reported. */
-    rx_tick = UART_Get_Frame_Rx_Tick(UART1_ID);
-    if ((uint32_t)(HAL_GetTick() - rx_tick) >= SENSOR_LINK_TIMEOUT_MS)
-    {
-        Sensor_Frame_Seen = 0U;
-        return 3U;
-    }
     /* [B2] Shift unsigned 32-bit fields, avoiding signed-shift UB. */
     GJ_Ad = (uint16_t)(((uint16_t)data[2] << 8) | data[3]);
     CG_Ad = Unsigned_Six_To_Signed_Six((uint16_t)(((uint16_t)data[4] << 8) | data[5]));
     Temp  = Unsigned_Six_To_Float(((uint32_t)data[6] << 24) |
                                   ((uint32_t)data[7] << 16) |
                                   ((uint32_t)data[8] << 8) | (uint32_t)data[9]);
-    Sensor_Last_Valid_Tick = rx_tick;
+    {
+        uint32_t now = HAL_GetTick();
+        if (Sensor_Frame_Seen &&
+            (uint32_t)(now - Sensor_Last_Valid_Tick) >= CG_CAL_MAX_GAP_MS)
+            Sensor_CG_Stability_Reset();
+        CG_Capture_Samples[CG_Capture_Index] = CG_Ad;
+        CG_Capture_Ticks[CG_Capture_Index] = now;
+        CG_Capture_Index = (uint8_t)((CG_Capture_Index + 1U) % CG_CAL_STABLE_SAMPLES);
+        if (CG_Capture_Count < CG_CAL_STABLE_SAMPLES) CG_Capture_Count++;
+        if (Sensor_Frame_Seen &&
+            (uint32_t)(now-Sensor_Last_Valid_Tick)>=CH_CAL_MAX_GAP_MS)
+            Sensor_GJ_Stability_Reset();
+        if (GJ_Ad==0U || GJ_Ad>0x7FFFU)
+            Sensor_GJ_Stability_Reset();
+        else
+        {
+            CH_Capture_Samples[CH_Capture_Index]=GJ_Ad;
+            CH_Capture_Ticks[CH_Capture_Index]=now;
+            CH_Capture_Index=(uint8_t)((CH_Capture_Index+1U)%CH_CAL_STABLE_SAMPLES);
+            if (CH_Capture_Count<CH_CAL_STABLE_SAMPLES) CH_Capture_Count++;
+        }
+        Sensor_Last_Valid_Tick = now;
+    }
     Sensor_Frame_Seen = 1;
     return 3;
 }
@@ -206,82 +333,53 @@ uint8_t UART2_PC_Change_Data_Mode(AGREEMEN_PARAM * AgreementParam)
     AgreementParam->dataNumber = 0;
     return 1;
 }
-/* Stage a full legacy reply before sending its header. Each service call
- * performs at most one read or one bounded TX, never both, so measurement
- * and UART1 processing run between slices. Buffer is foreground-only. */
-#define BULK_RECORD_BYTES ((uint16_t)sizeof(EEP_NODE))
-static uint8_t Bulk_Buffer[7U + MAX_INDEX_ADDR * sizeof(EEP_NODE)];
-static uint8_t Bulk_State;
-static uint16_t Bulk_Count, Bulk_Index, Bulk_Length, Bulk_Offset;
-static uint8_t Bulk_Checksum;
-
-uint8_t UART2_PC_Bulk_Is_Busy(void) { return (uint8_t)(Bulk_State != 0U); }
-
-static void UART2_PC_Bulk_Finalize(uint8_t cmd, uint16_t payload_len)
+uint8_t UART2_PC_Get_All_Eep(AGREEMEN_PARAM * AgreementParam)
 {
-    Bulk_Buffer[0] = 0x5AU;
-    Bulk_Buffer[1] = cmd;
-    Bulk_Buffer[2] = (uint8_t)(payload_len >> 8);
-    Bulk_Buffer[3] = (uint8_t)payload_len;
-    Bulk_Buffer[4U + payload_len] = (uint8_t)(Bulk_Checksum +
-          Bulk_Buffer[0] + Bulk_Buffer[1] + Bulk_Buffer[2] + Bulk_Buffer[3]);
-    Bulk_Buffer[5U + payload_len] = 0x0DU;
-    Bulk_Buffer[6U + payload_len] = 0x0AU;
-    Bulk_Length = (uint16_t)(payload_len + 7U);
-    Bulk_Offset = 0U;
-    Bulk_State = 2U;
-}
-
-static uint8_t UART2_PC_Get_All_Eep(void)
-{
-    uint16_t count;
-    if (Bulk_State != 0U || !Eep_Get_Node_Count(&count) || count > MAX_INDEX_ADDR)
-        return 0U;
-    Bulk_Count = count;
-    Bulk_Index = 0U;
-    Bulk_Checksum = 0U;
-    Bulk_State = 1U;
-    return 1U;
-}
-
-void UART2_PC_Bulk_Service(void)
-{
-    if (Bulk_State == 1U)
+    uint16_t number = 0, size;
+    uint32_t sum = 0;
+    /* [B3] Only use validated B3 metadata, not the overlapped legacy count. */
+    if (!Eep_Get_Node_Count(&number)) return 0;
+    if (number > MAX_INDEX_ADDR ||
+        (uint32_t)number * sizeof(EEP_NODE) > 65535UL) return 0;
+    size = (uint16_t)((uint32_t)number * sizeof(EEP_NODE));
+    //和
+    sum+=0x5A;
+    sum+=AgreementParam->cmd;
+    sum+=(size>>8)&0xFF;
+    sum+=size&0xFF;
+    
+    AgreementParam->CmdBuffer[0] = 0x5A;//发送帧头和应答码
+    AgreementParam->CmdBuffer[1] = AgreementParam->cmd;
+    AgreementParam->CmdBuffer[2] = (size>>8)&0xFF;//发送数据个数
+    AgreementParam->CmdBuffer[3] = size&0xFF;
+    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,4);
+    //发送数据
+    for(uint16_t i=0;i<number;i++)
     {
-        if (Bulk_Index < Bulk_Count)
-        {
-            uint16_t j;
-            uint8_t *dst = &Bulk_Buffer[4U + Bulk_Index * BULK_RECORD_BYTES];
-            if (Eep_Output_Node(Bulk_Index, dst) != 0U)
-            {
-                Bulk_Checksum = 0U;
-                UART2_PC_Bulk_Finalize(UART2_PC_GET_ALL_EEP_DATA_ACK | 0x40U, 0U);
-                return;
-            }
-            for (j = 0U; j < BULK_RECORD_BYTES; ++j)
-                Bulk_Checksum = (uint8_t)(Bulk_Checksum + dst[j]);
-            ++Bulk_Index;
-        }
-        if (Bulk_Index == Bulk_Count)
-            UART2_PC_Bulk_Finalize(UART2_PC_GET_ALL_EEP_DATA_ACK,
-                                   (uint16_t)(Bulk_Count * BULK_RECORD_BYTES));
-        return;
+        //获取存储节点数据
+        if (Eep_Output_Node(i, AgreementParam->CmdBuffer) != 0)
+            return 0; /* [B2] Stop streaming on read failure. */
+        //累加存储节点数据值
+        for(uint8_t j=0;j<sizeof(EEP_NODE);j++)
+            sum += AgreementParam->CmdBuffer[j];
+        //发送存储节点数据
+        UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,sizeof(EEP_NODE));
     }
-    if (Bulk_State == 2U)
-    {
-        uint16_t len = (uint16_t)(Bulk_Length - Bulk_Offset);
-        if (len > UART_TX_BUFFER_SIZE) len = UART_TX_BUFFER_SIZE;
-        if (!UART_Try_Send_Data(UART2_ID, &Bulk_Buffer[Bulk_Offset], len))
-        {
-            /* Physical TX failure may already have emitted bytes. Do not
-             * append a second frame to the truncated reply; host retries. */
-            Bulk_State = 0U;
-            return;
-        }
-        Bulk_Offset = (uint16_t)(Bulk_Offset + len);
-        if (Bulk_Offset == Bulk_Length) Bulk_State = 0U;
-    }
+    //校验
+    AgreementParam->CmdBuffer[0] = sum&0x000000FF;
+    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,1);
+    //帧尾
+    AgreementParam->CmdBuffer[0] = 0x0D;
+    AgreementParam->CmdBuffer[1] = 0x0A;
+    UART_Send_Data((UART_ID_t)AgreementParam->uart_id,(uint8_t*)AgreementParam->CmdBuffer,2);
+    
+    
+    return 1;
 }
+
+
+
+
 
 
 /* [B2] Validate command and its exact request payload before dispatch.
@@ -417,7 +515,7 @@ void Agreement_Ack_For_Fun(void)
             }
             break;
         case UART2_PC_GET_ALL_EEP_DATA_ACK:
-            if (UART2_PC_Get_All_Eep() != 0)
+            if (UART2_PC_Get_All_Eep(&CmdParam) != 0)
                 goto Uart_Rest;
             CmdParam.cmd |= (1U << 6);
             CmdParam.dataNumber = 0;

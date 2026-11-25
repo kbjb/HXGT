@@ -1,0 +1,10 @@
+CG37 TEST / 2026-11-23
+Keil ARMCC 5.06 update 7 build 960 mainboard rebuild PASS, 0 errors / 0 warnings.
+Calibration display regression PASS on the actual extracted page function.
+Live AD checked in all 10 calibration states at -32768, -1, 0, +1, +32767.
+Saved-point means, all WAIT reasons, READY, and stale-link placeholder checked.
+Text rectangles verified within 128x64 OLED bounds with no overlap.
+CG35 full-code sweeps, CG calculation, calibration/save/retry integration PASS.
+Windows GCC functional tests ran without UBSan because the installed compiler lacks libubsan.
+Intel HEX checksums, vector table and flash addresses verified.
+Physical OLED appearance and device behavior require board testing.

@@ -12,7 +12,6 @@
     extern float    ruler; 
     extern volatile uint8_t  send_en;
     extern volatile uint16_t send_cnt;
-    extern volatile uint32_t sensor_tick_ms;
 #endif
 
 #define POOLS_PAGE_ID_ADDR      0

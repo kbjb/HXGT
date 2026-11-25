@@ -59,37 +59,23 @@ void UART_Start_Receive(UART_ID_t uart_id)
     UART_B2_Arm(manager);
 }
 
-uint8_t UART_Try_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
+void UART_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
 {
     UART_Manager_t *manager;
     if (uart_id >= UART_MAX || data == NULL || length == 0 ||
-        length > UART_TX_BUFFER_SIZE) return 0U;
+        length > UART_TX_BUFFER_SIZE) return;
     manager = &uart_managers[uart_id];
-    if (manager->huart == NULL) return 0U;
+    if (manager->huart == NULL) return;
+    /* [B2] Only called from foreground. Bound a failed TX instead of
+     * indefinitely blocking the main loop with HAL_MAX_DELAY. */
     if (HAL_UART_Transmit(manager->huart, data, length, 100U) != HAL_OK)
-    {
         manager->error_count++;
-        return 0U;
-    }
-    return 1U;
-}
-
-void UART_Send_Data(UART_ID_t uart_id, uint8_t *data, uint16_t length)
-{
-    (void)UART_Try_Send_Data(uart_id, data, length);
 }
 
 uint8_t UART_Is_Frame_Ready(UART_ID_t uart_id)
 {
     if (uart_id >= UART_MAX) return 0;
     return uart_managers[uart_id].frame_ready;
-}
-
-/* Valid while frame_ready is set, including throughout its foreground callback. */
-uint32_t UART_Get_Frame_Rx_Tick(UART_ID_t uart_id)
-{
-    if (uart_id >= UART_MAX) return 0;
-    return uart_managers[uart_id].frame_rx_tick;
 }
 
 uint16_t UART_Get_Frame_Length(UART_ID_t uart_id)
@@ -107,9 +93,8 @@ uint8_t* UART_Get_Frame_Data(UART_ID_t uart_id)
 void UART_Clear_Frame_Flag(UART_ID_t uart_id)
 {
     if (uart_id >= UART_MAX) return;
-    /* Release ownership last: once ready clears the ISR may publish again. */
-    uart_managers[uart_id].frame_length = 0;
     uart_managers[uart_id].frame_ready = 0;
+    uart_managers[uart_id].frame_length = 0;
 }
 
 void UART_Register_Frame_Callback(UART_ID_t uart_id,
@@ -208,7 +193,6 @@ static void UART_B2_Consume_Byte(UART_ID_t uart_id, uint8_t c)
     else
     {
         memcpy(manager->frame_buffer, manager->rx_buffer, manager->expected_length);
-        manager->frame_rx_tick = HAL_GetTick();
         manager->frame_length = manager->expected_length;
         manager->frame_ready = 1;
     }

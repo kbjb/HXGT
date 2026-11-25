@@ -10,7 +10,6 @@ typedef struct IIC_CLASS_STR
     GPIO_STR *sclk_gpio;
     GPIO_STR *sda_gpio;
     uint32_t  delay_cnt;
-    GPIOMode_TypeDef sda_output_mode;
     void      (*str_init)(struct IIC_CLASS_STR*) ;
     void      (*init)(struct IIC_CLASS_STR*);
     void      (*start)(struct IIC_CLASS_STR *);

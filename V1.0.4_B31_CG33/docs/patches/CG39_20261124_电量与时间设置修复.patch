@@ -1,0 +1,881 @@
+--- a/STM32L151/Software/inc/param_head.h
++++ b/STM32L151/Software/inc/param_head.h
+@@ -165,6 +165,7 @@
+ extern float   CZ_Value;
+ extern float   HB_Value;
+ extern uint8_t Set_Time[6] ;
++extern uint8_t Set_Time_Error; /* [CG39] 1=read,2=invalid,3=write */
+     
+ extern uint8_t Set_Time_Select;
+ extern uint8_t Set_Time_Select_History;
+--- a/STM32L151/Software/inc/pcf8563_head.h
++++ b/STM32L151/Software/inc/pcf8563_head.h
+@@ -45,6 +45,13 @@
+ 
+ 
+ /* �������� */
++/* [CG39] Application century convention: 0=2000..2099, 1=2100..2199.
++ * Editing on the six-field page is explicitly restricted to 20xx. */
++uint8_t PCF8563_DaysInMonth(uint8_t year,uint8_t month,uint8_t century);
++uint8_t PCF8563_TimeIsValid(const PCF8563_TimeTypeDef *time);
++uint8_t PCF8563_Weekday(uint8_t year,uint8_t month,uint8_t day);
++void PCF8563_NormalizeEdit(uint8_t fields[6]);
++
+ uint8_t PCF8563_Init(I2C_HandleTypeDef *hi2c);
+ uint8_t PCF8563_SetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time);
+ uint8_t PCF8563_GetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time);
+--- a/STM32L151/Software/src/App_code.c
++++ b/STM32L151/Software/src/App_code.c
+@@ -30,16 +30,81 @@
+ {
+     uint32_t CurrentTime=HAL_GetTick();
+     
+-    OLED_PrintString(40,4,"CG38 TEST",FONT_8X16);
++    OLED_PrintString(40,4,"CG39 TEST",FONT_8X16);
+     if((CurrentTime-ReflashTime)>1500)
+     {
+         set_PageId(page_main);
+     }
++}
++
++extern I2C_HandleTypeDef hi2c2;
++/* [CG39] Shared measurement-page battery state. Sampling is independent
++ * from low-battery blinking, and entering a page redraws the cached level. */
++#define BATTERY_SAMPLE_PERIOD_MS 5000U
++#define BATTERY_BLINK_PERIOD_MS   500U
++static uint8_t Battery_Initialized=0U, Battery_Level=0U;
++static uint8_t Battery_Visible=1U, Battery_Force_Redraw=1U;
++static uint8_t Battery_Last_Icon=0xFFU;
++static uint32_t Battery_Sample_Tick=0U, Battery_Blink_Tick=0U;
++
++static void Measurement_Battery_Refresh(void)
++{
++    uint32_t now=HAL_GetTick();
++    uint8_t redraw=Battery_Force_Redraw;
++    uint8_t icon;
++    const char *bitmap;
++    if (!Battery_Initialized || (uint32_t)(now-Battery_Sample_Tick)>=BATTERY_SAMPLE_PERIOD_MS)
++    {
++        uint8_t previous=Battery_Level;
++        Battery_Level=Get_Driver_Power(ADC_ReadChannel9());
++        Battery_Sample_Tick=now;
++        if (!Battery_Initialized || previous!=Battery_Level)
++        {
++            Battery_Visible=1U;
++            Battery_Blink_Tick=now;
++            redraw=1U;
++        }
++        Battery_Initialized=1U;
++    }
++    if (Battery_Level==0U && (uint32_t)(now-Battery_Blink_Tick)>=BATTERY_BLINK_PERIOD_MS)
++    {
++        uint32_t periods=(uint32_t)(now-Battery_Blink_Tick)/BATTERY_BLINK_PERIOD_MS;
++        if ((periods&1U)!=0U) Battery_Visible=1U-Battery_Visible;
++        Battery_Blink_Tick+=periods*BATTERY_BLINK_PERIOD_MS;
++    }
++    icon=Battery_Level==0U && !Battery_Visible ? 5U : Battery_Level;
++    if (redraw || icon!=Battery_Last_Icon)
++    {
++        switch(icon)
++        {
++            case 0U: bitmap=power_0_ico; break;
++            case 1U: bitmap=power_1_ico; break;
++            case 2U: bitmap=power_2_ico; break;
++            case 3U: bitmap=power_3_ico; break;
++            case 4U: bitmap=power_4_ico; break;
++            default: bitmap=power_n_ico; break;
++        }
++        OLED_ShowImage(105,0,16,8,(uint8_t *)bitmap);
++        Battery_Last_Icon=icon;
++    }
++    Battery_Force_Redraw=0U;
++}
++
++static void Measurement_Time_Refresh(void)
++{
++    PCF8563_TimeTypeDef time;
++    char text[20];
++    if (PCF8563_GetTime(&hi2c2,&time)==HAL_OK && time.century==0U)
++        snprintf(text,sizeof(text),"%02u/%02u/%02u %02u:%02u",(unsigned)time.year,
++                 (unsigned)time.month,(unsigned)time.day,(unsigned)time.hour,(unsigned)time.minute);
++    else snprintf(text,sizeof(text),"--/--/-- --:--");
++    OLED_PrintString(5,0,text,FONT_6X8);
+ }
+ 
+ /*************************������***************************/
+ void Main_Page_Init(void)
+ {
++    Battery_Force_Redraw=1U;
+     Main_Values_Need_Redraw = 1U;
+     CG_Display_Status_History = 0xFFU;
+     CG_Value_History = 0;
+@@ -53,10 +118,6 @@
+ 
+ 
+ extern I2C_HandleTypeDef hi2c2;
+-static int8_t  Power_0_Ico_Show_Timer_Status = 0;
+-static uint16_t Power_Ico_Show_Timer_Freq = 5000;
+-static uint32_t Power_Ico_Show_Timer_History = 0;
+-static uint32_t Power_Ico_Show_Timer_Now = 0;
+ void Main_Page_Reflash(void)
+ {
+     char buffer[20];
+@@ -113,47 +174,8 @@
+     }
+ 
+     Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
+-    /*��ʾʱ��*/
+-    //��ȡʱ������
+-    PCF8563_TimeTypeDef time;
+-    PCF8563_GetTime(&hi2c2,&time);
+-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
+-    OLED_PrintString(5,0,buffer,FONT_6X8);
+-    
+-    
+-    Power_Ico_Show_Timer_Now =HAL_GetTick();
+-    if((Power_Ico_Show_Timer_Now - Power_Ico_Show_Timer_History)>Power_Ico_Show_Timer_Freq)
+-    {
+-        uint8_t Driver_Power_Level = Get_Driver_Power(ADC_ReadChannel9());
+-        /*��ʾ������Ϣ*/
+-        if(Driver_Power_Level == 0)
+-        {
+-            Power_Ico_Show_Timer_Freq = 500;
+-            Power_0_Ico_Show_Timer_Status = 1-Power_0_Ico_Show_Timer_Status;
+-            if(Power_0_Ico_Show_Timer_Status == 0)
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_0_ico);
+-            else
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_n_ico);
+-        }
+-        else
+-        {
+-            Power_Ico_Show_Timer_Freq = 5000;
+-            if(Driver_Power_Level == 4)
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
+-            else if(Driver_Power_Level == 3)
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_3_ico);
+-            else if(Driver_Power_Level == 2)
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_2_ico);
+-            else
+-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_1_ico);
+-        }
+-        Power_Ico_Show_Timer_History = Power_Ico_Show_Timer_Now;
+-    }
+-    
+-    
+-    
+-    
+-    /*��ʾĿ����ʾ*/
++    Measurement_Time_Refresh();
++    Measurement_Battery_Refresh();
+     if(Goal_Set_Status == 1)
+     {
+         OLED_PrintString(5,1,"MUBIAO",FONT_6X8);
+@@ -195,6 +217,7 @@
+ static uint8_t CH_Values_Need_Redraw=1U;
+ void CH_Page_Init(void)
+ {
++    Battery_Force_Redraw=1U;
+     CZ_Value_S = 0,HB_Value_S = 0;
+     CH_Display_Status_History=0xFFU;
+     CH_Values_Need_Redraw=1U;
+@@ -251,12 +274,8 @@
+         }
+     }
+     CH_Values_Need_Redraw=0U;
+-    PCF8563_TimeTypeDef time;
+-    PCF8563_GetTime(&hi2c2,&time);
+-    snprintf(buffer,sizeof(buffer),"%02d/%02d/%02d %02d:%02d",time.year,time.month,time.day,time.hour,time.minute);
+-    OLED_PrintString(5,0,buffer,FONT_6X8);
+-    /*��ʾ��������*/
+-    OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
++    Measurement_Time_Refresh();
++    Measurement_Battery_Refresh();
+ }
+ 
+ /************************�˵�ѡ�����***************************/
+@@ -327,71 +346,53 @@
+ void Time_Set_Page_Init(void)
+ {
+     PCF8563_TimeTypeDef timeT;
+-    PCF8563_GetTime(&hi2c2,&timeT);
++    uint8_t i;
++    static const uint8_t fallback[6]={0,1,1,0,0,0};
++    Set_Time_Error=0U;
++    for (i=0U;i<6U;++i) Set_Time[i]=fallback[i];
++    if (PCF8563_GetTime(&hi2c2,&timeT)==HAL_OK && timeT.century==0U)
++    {
++        Set_Time[0]=timeT.year; Set_Time[1]=timeT.month; Set_Time[2]=timeT.day;
++        Set_Time[3]=timeT.hour; Set_Time[4]=timeT.minute; Set_Time[5]=timeT.second;
++    }
++    else Set_Time_Error=1U;
++    PCF8563_NormalizeEdit(Set_Time);
+     OLED_PrintString(9,2,"Y",FONT_8X16);
+     OLED_PrintString(49,2,"M",FONT_8X16);
+     OLED_PrintString(89,2,"D",FONT_8X16);
+     OLED_PrintString(9,5,"h",FONT_8X16);
+     OLED_PrintString(49,5,"m",FONT_8X16);
+     OLED_PrintString(89,5,"s",FONT_8X16);
+-    
+-    Set_Time[0]     = timeT.year;
+-    Set_Time[1]     = timeT.month;
+-    Set_Time[2]     = timeT.day;
+-    Set_Time[3]     = timeT.hour;
+-    Set_Time[4]     = timeT.minute;
+-    Set_Time[5]     = timeT.second;
+-    Set_Time_Select = 0;
+-    Set_Time_Select_History = 1;
+-    
++    Set_Time_Select=0U;
++    Set_Time_Select_History=0xFFU;
+ }
+ 
+ void Time_Set_Page_Reflash(void)
+ {
+-    char buffer[8]; /* [B1] Time fields have room for unexpected values. */
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[0]);
+-    OLED_PrintString(20,2,buffer,FONT_8X16);
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[1]);
+-    OLED_PrintString(60,2,buffer,FONT_8X16);
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[2]);
+-    OLED_PrintString(100,2,buffer,FONT_8X16);
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[3]);
+-    OLED_PrintString(20,5,buffer,FONT_8X16);
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[4]);
+-    OLED_PrintString(60,5,buffer,FONT_8X16);
+-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[5]);
+-    OLED_PrintString(100,5,buffer,FONT_8X16);
+-    if(Set_Time_Select_History!=Set_Time_Select)
+-    {
+-        switch(Set_Time_Select)
+-        {
+-            case 0:
+-                OLED_PrintLine(100,116,7,0x00);
+-                OLED_PrintLine(20,36,4,0x01);
+-                break;
+-            case 1:
+-                OLED_PrintLine(20,36,4,0x00);
+-                OLED_PrintLine(60,76,4,0x01);
+-                break;
+-            case 2:
+-                OLED_PrintLine(60,76,4,0x00);
+-                OLED_PrintLine(100,116,4,0x01);
+-                break;
+-            case 3:
+-                OLED_PrintLine(100,116,4,0x00);
+-                OLED_PrintLine(20,36,7,0x01);
+-                break;
+-            case 4:
+-                OLED_PrintLine(20,36,7,0x00);
+-                OLED_PrintLine(60,76,7,0x01);
+-                break;
+-            case 5:
+-                OLED_PrintLine(60,76,7,0x00);
+-                OLED_PrintLine(100,116,7,0x01);
+-                break;
+-        }
+-        Set_Time_Select_History = Set_Time_Select;
+-    }
++    static const uint8_t xpos[6]={20,60,100,20,60,100};
++    static const uint8_t ypos[6]={2,2,2,5,5,5};
++    uint8_t i;
++    char text[4];
++    const char *status="20YY             ";
++    PCF8563_NormalizeEdit(Set_Time);
++    if (Set_Time_Select>=6U) Set_Time_Select=0U;
++    for (i=0U;i<6U;++i)
++    {
++        /* Two digits plus one space removes any old third digit (e.g. 999).
++         * Day/seconds end at x=123, within the 128 px display. */
++        snprintf(text,sizeof(text),"%02u ",(unsigned)(Set_Time[i]%100U));
++        OLED_PrintString(xpos[i],ypos[i],text,FONT_8X16);
++    }
++    if (Set_Time_Select_History!=Set_Time_Select)
++    {
++        for (i=0U;i<6U;++i)
++            OLED_PrintLine(xpos[i],xpos[i]+16U,ypos[i]+2U,i==Set_Time_Select ? 0x01 : 0x00);
++        Set_Time_Select_History=Set_Time_Select;
++    }
++    if (Set_Time_Error==1U) status="RTC READ ERROR   ";
++    else if (Set_Time_Error==2U) status="INVALID DATE     ";
++    else if (Set_Time_Error==3U) status="RTC WRITE ERROR  ";
++    OLED_PrintString(5,0,(char *)status,FONT_6X8);
+ }
+ 
+ /*************************Ŀ�����ý���***************************/
+--- a/STM32L151/Software/src/App_key.c
++++ b/STM32L151/Software/src/App_key.c
+@@ -74,8 +74,15 @@
+ 
+ void Reduce_Time_For_Time_Select(void)
+ {
+-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
+-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == 0?Time_Set_Threshold[Set_Time_Select]:Set_Time[Set_Time_Select]-1;
++    static const uint8_t maxima[6]={99,12,31,23,59,59};
++    uint8_t minimum,maximum;
++    if (Set_Time_Select>=6U) Set_Time_Select=0U;
++    PCF8563_NormalizeEdit(Set_Time);
++    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
++    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
++    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]<=minimum) ? maximum : Set_Time[Set_Time_Select]-1U;
++    PCF8563_NormalizeEdit(Set_Time);
++    Set_Time_Error=0U;
+ }
+ 
+ void Reduce_Goal_For_Goal_Select(void)
+@@ -122,8 +129,15 @@
+ 
+ void InCrease_Time_For_Time_Select(void)
+ {
+-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
+-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == Time_Set_Threshold[Set_Time_Select]?0:Set_Time[Set_Time_Select]+1;
++    static const uint8_t maxima[6]={99,12,31,23,59,59};
++    uint8_t minimum,maximum;
++    if (Set_Time_Select>=6U) Set_Time_Select=0U;
++    PCF8563_NormalizeEdit(Set_Time);
++    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
++    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
++    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]>=maximum) ? minimum : Set_Time[Set_Time_Select]+1U;
++    PCF8563_NormalizeEdit(Set_Time);
++    Set_Time_Error=0U;
+ }
+ void InCrease_Goal_For_Goal_Select(void)
+ {
+@@ -181,7 +195,7 @@
+ 
+ void Change_Time_Select_Id(void)
+ {
+-    Set_Time_Select = Set_Time_Select == 5?0:Set_Time_Select+1;
++    Set_Time_Select=(Set_Time_Select>=5U) ? 0U : Set_Time_Select+1U;
+ }
+ 
+ void Change_Goal_Set_Select_Id(void)
+@@ -284,20 +298,28 @@
+ extern I2C_HandleTypeDef hi2c2;
+ void Change_Time_For_Set_Time(void)
+ {
+-    PCF8563_TimeTypeDef time;
+-    time.year = Set_Time[0];
+-    time.month = Set_Time[1];
+-    time.day = Set_Time[2];
+-    time.hour = Set_Time[3];
+-    time.minute = Set_Time[4];
+-    time.second = Set_Time[5];
+-    if(PCF8563_SetTime(&hi2c2,&time) == HAL_OK)
+-    {
++    PCF8563_TimeTypeDef time={0};
++    time.year=Set_Time[0]; time.month=Set_Time[1]; time.day=Set_Time[2];
++    time.hour=Set_Time[3]; time.minute=Set_Time[4]; time.second=Set_Time[5];
++    time.century=0U; /* Six-field editor uses 2000..2099. */
++    time.weekday=PCF8563_Weekday(time.year,time.month,time.day);
++    if (!PCF8563_TimeIsValid(&time))
++    {
++        Set_Time_Error=2U;
++        Beep_Ctrl(100,3);
++        return;
++    }
++    if (PCF8563_SetTime(&hi2c2,&time)==HAL_OK)
++    {
++        Set_Time_Error=0U;
+         Beep_Ctrl(100,1);
+         set_PageId(page_menu);
+     }
+     else
++    {
++        Set_Time_Error=3U;
+         Beep_Ctrl(100,3);
++    }
+ }
+ 
+ /*�洢����ع���*/
+--- a/STM32L151/Software/src/param_code.c
++++ b/STM32L151/Software/src/param_code.c
+@@ -19,6 +19,7 @@
+ float   CZ_Value = 0.0f;                     //��������
+ float   HB_Value = 0.0f;                    //��������
+ 
++uint8_t Set_Time_Error=0U; /* [CG39] */
+ uint8_t Set_Time[6]    = {24,8,5,1,59,32};      //ʱ�����ý��� ʱ�����뻺������ֱ��Ӧ �� �� �� ʱ �� ��
+ uint8_t Set_Time_Select = 0;                    //ʱ�����ý��� ��ǰѡ��Ҫ�޸ĵ�ʱ����
+ uint8_t Set_Time_Select_History = 1;            //ʱ�����ý��� ��һ��ѡ��Ҫ�޸ĵ�ʱ����
+--- a/STM32L151/Software/src/pcf8563_code.c
++++ b/STM32L151/Software/src/pcf8563_code.c
+@@ -1,4 +1,57 @@
+ #include "pcf8563_head.h"
++
++/* [CG39] Calendar bounds are shared by editor and RTC access checks. */
++uint8_t PCF8563_DaysInMonth(uint8_t year,uint8_t month,uint8_t century)
++{
++    static const uint8_t days[12]={31,28,31,30,31,30,31,31,30,31,30,31};
++    uint16_t full_year=(uint16_t)(2000U+100U*century+year);
++    if (month<1U || month>12U || year>99U || century>1U) return 0U;
++    if (month==2U && full_year%4U==0U &&
++        (full_year%100U!=0U || full_year%400U==0U)) return 29U;
++    return days[month-1U];
++}
++
++uint8_t PCF8563_TimeIsValid(const PCF8563_TimeTypeDef *time)
++{
++    uint8_t days;
++    if (time==0) return 0U;
++    days=PCF8563_DaysInMonth(time->year,time->month,time->century);
++    return (days!=0U && time->day>=1U && time->day<=days &&
++            time->hour<=23U && time->minute<=59U && time->second<=59U &&
++            time->weekday<=6U) ? 1U : 0U;
++}
++
++uint8_t PCF8563_Weekday(uint8_t year,uint8_t month,uint8_t day)
++{
++    uint32_t days=0U;
++    uint8_t y,m;
++    if (year>99U || month<1U || month>12U || day<1U ||
++        day>PCF8563_DaysInMonth(year,month,0U)) return 0U;
++    for (y=0U;y<year;++y) days+=(y%4U==0U) ? 366U : 365U;
++    for (m=1U;m<month;++m) days+=PCF8563_DaysInMonth(year,m,0U);
++    return (uint8_t)((6U+days+day-1U)%7U); /* 2000-01-01 was Saturday. */
++}
++
++void PCF8563_NormalizeEdit(uint8_t fields[6])
++{
++    uint8_t days;
++    if (fields==0) return;
++    if (fields[0]>99U) fields[0]=0U;
++    if (fields[1]<1U || fields[1]>12U) fields[1]=1U;
++    days=PCF8563_DaysInMonth(fields[0],fields[1],0U);
++    if (fields[2]<1U) fields[2]=1U;
++    if (fields[2]>days) fields[2]=days;
++    if (fields[3]>23U) fields[3]=0U;
++    if (fields[4]>59U) fields[4]=0U;
++    if (fields[5]>59U) fields[5]=0U;
++}
++
++static uint8_t PCF8563_BCDIsValid(uint8_t bcd)
++{
++    return ((bcd&0x0FU)<=9U && (bcd>>4)<=9U) ? 1U : 0U;
++}
++
++
+ 
+ 
+ /**
+@@ -63,6 +116,8 @@
+     uint8_t data[8];
+     HAL_StatusTypeDef status;
+     
++    if (hi2c==0 || !PCF8563_TimeIsValid(time)) return HAL_ERROR;
++
+     /* ׼��ʱ������ */
+     data[0] = PCF8563_REG_SC;  // ��ʼ�Ĵ�����ַ
+     
+@@ -105,37 +160,30 @@
+   */
+ uint8_t PCF8563_GetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time)
+ {
+-    uint8_t data[7];
+-    HAL_StatusTypeDef status;
+-    uint8_t reg_addr = PCF8563_REG_SC;
+-    
+-    /* ���ö�ȡ��ʼ��ַ */
+-    status = HAL_I2C_Master_Transmit(hi2c, PCF8563_ADDR_WRITE, &reg_addr, 1, 100);
+-    if (status != HAL_OK)
+-    {
+-        return status;
+-    }
+-    
+-    /* ��ȡʱ������ */
+-    status = HAL_I2C_Master_Receive(hi2c, PCF8563_ADDR_READ, data, 7, 100);
+-    if (status != HAL_OK)
+-    {
+-        return status;
+-    }
+-    
+-    /* ����ʱ������ */
+-    time->second = BCD_to_DEC(data[0] & 0x7F);  // ����VLλ
+-    time->minute = BCD_to_DEC(data[1] & 0x7F);
+-    time->hour = BCD_to_DEC(data[2] & 0x3F);
+-    time->day = BCD_to_DEC(data[3] & 0x3F);
+-    time->weekday = data[4] & 0x07;
+-    
+-    /* �º����ͱ�־ */
+-    time->century = (data[5] & PCF8563_MO_C) ? 1 : 0;
+-    time->month = BCD_to_DEC(data[5] & 0x1F);
+-    
+-    time->year = BCD_to_DEC(data[6]);
+-    
++    uint8_t data[7],i;
++    static const uint8_t masks[7]={0x7F,0x7F,0x3F,0x3F,0x07,0x1F,0xFF};
++    uint8_t reg_addr=PCF8563_REG_SC;
++    HAL_StatusTypeDef status;
++    PCF8563_TimeTypeDef decoded;
++    if (hi2c==0 || time==0) return HAL_ERROR;
++    status=HAL_I2C_Master_Transmit(hi2c,PCF8563_ADDR_WRITE,&reg_addr,1,100);
++    if (status!=HAL_OK) return status;
++    /* NXP: seconds through years must be read in one access. */
++    status=HAL_I2C_Master_Receive(hi2c,PCF8563_ADDR_READ,data,7,100);
++    if (status!=HAL_OK) return status;
++    if ((data[0]&PCF8563_SC_VL)!=0U) return HAL_ERROR;
++    for (i=0U;i<7U;++i)
++        if (i!=4U && !PCF8563_BCDIsValid(data[i]&masks[i])) return HAL_ERROR;
++    decoded.second=BCD_to_DEC(data[0]&0x7F);
++    decoded.minute=BCD_to_DEC(data[1]&0x7F);
++    decoded.hour=BCD_to_DEC(data[2]&0x3F);
++    decoded.day=BCD_to_DEC(data[3]&0x3F);
++    decoded.weekday=data[4]&0x07;
++    decoded.month=BCD_to_DEC(data[5]&0x1F);
++    decoded.century=(data[5]&PCF8563_MO_C)!=0U ? 1U : 0U;
++    decoded.year=BCD_to_DEC(data[6]);
++    if (!PCF8563_TimeIsValid(&decoded)) return HAL_ERROR;
++    *time=decoded; /* Caller data is untouched on any error. */
+     return HAL_OK;
+ }
+ 
+--- /dev/null
++++ b/docs/guides/CG39_20261124_电量与时间设置测试说明.md
+@@ -0,0 +1,78 @@
++# CG39 TEST 电量显示与时间设置修复
++
++2026-11-24。基于 43b6e2f / CG38 TEST，STM32L151 主控，配套现有 CG34 TEST 倾角板。
++
++## 固件与升级
++
++主控文件为 `firmware/CG39_TEST_20261124/STM32L151_CG39_TEST.hex`，开机显示 CG39 TEST。已使用 CG34 TEST 倾角板的样机只更新主控。本次没有执行硬件烧录。
++
++测量算法、查护/超高标定、EEPROM 布局及标定参数没有修改。正常升级无需因本次 UI 修复而重新标定。CG38 的查护机械方向/比例实测要求，以及相同 AD 保存后的旧固件回退兼容要求仍见 CG38 说明。
++
++## 电量不一致的原因与修复
++
++原 `Main_Page_Reflash()` 根据 ADC 电压和原电量换算函数选择图标，`CH_Page_Reflash()` 则直接画 `power_4_ico`，所以查护页始终显示满电。主页面还存在进入时等待下一轮定时才画图标的情况。
++
++现在两个测量页面共同调用 `Measurement_Battery_Refresh()`，使用同一份缓存、相同图标、相同电压换算。第一次进入测量页立即采样并画图，之后切换页面立即重绘缓存，不因切换页面重复采样或显示满电。
++
++电压采样周期统一为 5000 ms，低电量时每 500 ms 在空电池和空白图标之间切换。采样与闪烁独立，原低电量闪烁时每 500 ms 重采样的行为调整为统一的 5 s 周期；原 `Get_Driver_Power()` 的十点平均和电压分档阈值保持原值。本次统一的是显示和调度，没有重新标定电量百分比或电压模型。
++
++修改位置为 `STM32L151/Software/src/App_code.c` 的共享电量函数，参数 `BATTERY_SAMPLE_PERIOD_MS`、`BATTERY_BLINK_PERIOD_MS` 位于该函数前。
++
++## 时间出现几百、999 的原因
++
++用户反馈按加减有时显示几百或 999。源码确认存在以下缺陷，能够在模拟异常数据时复现越界和残留，实机触发源尚未捕获。
++
++- 进入页面未检查 RTC 读取返回值，读取失败时可能把未初始化的栈变量复制到编辑数组。
++- 原 RTC 读取未校验 BCD、实际日期或低电压标志，异常寄存器可能被当成时间。
++- 原加减仅判断“恰好等于上限”或“恰好等于零”，起始值超出范围时还会继续增减。
++- `%02d` 只限定最少两位，三位数随后变回两位时没有擦除旧的第三位，可能出现拼接后的三位显示。`Set_Time` 每项是 uint8_t，单项本身只能取 0～255，不能直接存放 999。
++- 月份/日期可以调到 00，也未考虑大小月和闰年；保存时 weekday 和 century 没有初始化。
++
++## 时间设置的新操作规则
++
++| 按键 | 操作 |
++| --- | --- |
++| 左键 | 当前字段减一，到下限后回到该字段上限 |
++| 右键 | 当前字段加一，到上限后回到该字段下限 |
++| 切换键 | 年 → 月 → 日 → 时 → 分 → 秒 → 年 |
++| 确认键 | 校验并写入 RTC，成功返回菜单，失败留在页面 |
++| 取消键 | 返回菜单，不保存本次编辑 |
++
++各字段独立循环，不将秒/分的边界操作自动进位到下一字段。年月范围为 2000～2099，Y 显示后两位，顶部 `20YY` 提示世纪，例如 Y=26 表示 2026 年。
++
++年 00～99、月 01～12、日 01～当月最后一天、时 00～23、分秒 00～59。改年或月时，若原日期不存在，会缩到新月份最后一天，例如 2026-01-31 改成 2 月为 2026-02-28，2024-02-29 改为 2025 年则变为 2025-02-28。
++
++页面进入时检查 RTC 读取结果；加减前后和刷新时恢复异常范围，选择索引也有防越界处理。每个字段固定显示两个数字再覆盖一个空格，擦掉可能存在的旧第三位。下划线按当前实际选择重绘，不依赖中间切换状态逐个刷新。
++
++保存时完整初始化所有 RTC 字段，weekday 根据日期计算，century 明确为 0（本工程约定 20xx）。写入前再次校验，I2C 写入返回 HAL_OK 后才返回菜单，失败提示并允许重试。本次没有新增 EEPROM 写入。
++
++## RTC 异常提示
++
++- `RTC READ ERROR`：通信失败、日期/BCD 不合法、RTC 低电压标志，或超出本设置页的 20xx 世纪。页面先提供 `00-01-01 00:00:00` 编辑初值，这不是当前时间，也不会自动写入；请设置全部正确字段后确认。加减后清除旧错误提示，取消可退出。
++- `INVALID DATE`：确认时仍然发现非法日期/时间，不执行写入。
++- `RTC WRITE ERROR`：RTC 写入返回失败，留在当前页，用户可以重试或取消。总线中途失败时 RTC 可能已写入部分数据，需重试完整设置并重新进入核对，不能视为完成。
++- 两个测量页面读时钟失败时统一显示 `--/--/-- --:--`，避免显示未初始化值。通信恢复且时间有效后自动恢复显示。
++
++驱动继续在同一笔访问中读取/写入秒到年寄存器；这是 NXP 对避免进位时读写不一致的要求。低电压标志说明时钟准确性不能保证，需重新设置时间。参考 [NXP PCF8563 数据手册](https://www.nxp.com/docs/en/data-sheet/PCF8563.pdf) 的日期时间寄存器和 Setting and reading the time 部分。
++
++## 实机测试步骤
++
++1. 烧录主控，确认开机 CG39 TEST。在轨距/超高与查护页来回切换，确认电量等级相同，进入就能显示图标。低电量时两页使用同一闪烁状态。
++2. 进入时间设置，观察左减、右加、切换键和下划线位置。连续调整每个字段，检查始终为两位，月/日不出现 00，也不出现几百或旧第三位残留。
++3. 分别检查 12 月加一到 01、01 月减一到 12、23 时加一到 00、00 时减一到 23、59 分/秒加一到 00。
++4. 检查 2026 年 1 月 31 日切换到 2 月变为 28 日；2024 年 2 月可取 29 日，改为 2025 年后应收敛到 28 日。
++5. 设置当前日期时间，确认返回菜单；重新进入核对，秒应继续运行。编辑后取消，再进入应读回 RTC，不能保存取消的内容。
++6. 正常关机再开机检查走时。RTC READ ERROR 持续出现或断电后时间丢失时，记录现象，再检查 RTC 供电/后备电源与通信；本版未进行硬件检查。
++7. 复测轨距、超高、查护显示与原标定流程。
++
++## 软件验证与记录
++
++电量/时间专项 112643 项检查通过，包含 2000～2099 年全部有效日期的星期和日数对照 Python 标准库、各字段全部 0～255 输入、边界循环、闰年/大小月、RTC 寄存器编码、非法 BCD/日期/低电压标志、I2C 读写故障、选择下划线、旧第三位擦除、OLED 边界、五秒采样/半秒闪烁和 tick 回绕。
++
++CG38 查护专项 98484 项检查、原超高全 AD 扫描与 CG37 标定显示、B31 EEPROM 357 项、B2 串口/判稳 91 项回归通过。CG38 专项中的电量和时间被独立为本版专项验证，检查计数因此调整。
++
++主控 Keil 全量编译为零错误、零警告。Windows GCC 功能回归未启用 UBSan，因为本机工具链没有该运行库；POSIX 原测试入口保留默认 UBSan。电量实际等级、按键手感、屏幕效果和 RTC 断电走时需要实机验证。
++
++统一入口 `sh tests/CG32_HOST_TESTS/run_cg32_tests.sh` 已包含本版专项。单独运行 `python3 tests/CG39_HOST_TESTS/test_ui.py`；不支持 UBSan 时明确设置 `HOST_SANITIZERS=0`。
++
++交付目录附有主机测试输出、Keil 编译日志、测试记录、源码校验和 SHA256SUMS.txt。增量补丁位于 `docs/patches/CG39_20261124_电量与时间设置修复.patch`。
+--- a/tests/CG32_HOST_TESTS/run_cg32_tests.sh
++++ b/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+@@ -12,6 +12,7 @@
+ python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
+ python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
+ python3 "$TESTS/CG38_HOST_TESTS/test_ch.py"
++python3 "$TESTS/CG39_HOST_TESTS/test_ui.py"
+ sh "$TESTS/B31_HOST_TESTS/run_b31_tests.sh"
+ sh "$TESTS/B2_HOST_TESTS/run_master_tests.sh"
+ python3 "$TESTS/B2_HOST_TESTS/test_qing.py"
+--- a/tests/CG38_HOST_TESTS/test_ch.py
++++ b/tests/CG38_HOST_TESTS/test_ch.py
+@@ -71,13 +71,14 @@
+ static unsigned storage_state=1,page_id=0;
+ unsigned Eep_Get_Storage_State(void){return storage_state;}
+ typedef struct {unsigned year,month,day,hour,minute;} PCF8563_TimeTypeDef;
+-static int hi2c2;
++static uint8_t Battery_Force_Redraw;
++void Measurement_Battery_Refresh(void){}
++void Measurement_Time_Refresh(void){}
+ void PCF8563_GetTime(void *h,PCF8563_TimeTypeDef *t){(void)h;*t=(PCF8563_TimeTypeDef){26,11,23,12,0};}
+ void set_PageId(unsigned p){page_id=p;}
+ static char texts[100][40];static unsigned ntexts=0,clears=0;
+ void OLED_Clear(void){clears++;}
+ static void rect(unsigned x,unsigned y,unsigned w,unsigned h){CHECK(x+w<=128 && y+h<=8);}
+-static uint8_t power_4_ico[16];
+ void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,uint8_t *data){(void)data;rect(x,y,w,(h+7U)/8U);}
+ void OLED_PrintString(unsigned x,unsigned y,char *s,unsigned font){
+     rect(x,y,(unsigned)strlen(s)*(font==FONT_8X16?8U:6U),font==FONT_8X16?2U:1U);
+--- /dev/null
++++ b/tests/CG39_HOST_TESTS/test_ui.py
+@@ -0,0 +1,203 @@
++#!/usr/bin/env python3
++"""CG39 battery/calendar regression compiled from actual firmware functions.
++
++Fake HAL I2C checks register bytes and injects failed reads/writes. No hardware.
++CC selects compiler; HOST_SANITIZERS=0 disables UBSan explicitly if unavailable.
++"""
++from pathlib import Path
++import datetime, os, re, subprocess, tempfile
++root=Path(__file__).resolve().parents[2]
++def read(p): return (root/p).read_bytes().decode('gb18030').replace('\r\n','\n')
++def extract(s,sig):
++    a=s.index(sig); b=s.index('{',a); depth=0
++    for i in range(b,len(s)):
++        depth+=(s[i]=='{')-(s[i]=='}')
++        if depth==0:return s[a:i+1]+'\n'
++    raise ValueError(sig)
++oled=read('STM32L151/Software/src/App_code.c')
++key=read('STM32L151/Software/src/App_key.c')
++rtc=read('STM32L151/Software/src/pcf8563_code.c')
++header=read('STM32L151/Software/inc/pcf8563_head.h')
++for name in ['Main','CH']:
++    assert 'Battery_Force_Redraw=1U;' in extract(oled,'void '+name+'_Page_Init(')
++    page=extract(oled,'void '+name+'_Page_Reflash(')
++    assert 'Measurement_Battery_Refresh();' in page
++    assert 'Measurement_Time_Refresh();' in page
++    assert 'power_4_ico' not in page
++routes={'KEY_ID_LEFT':'Reduce_Time_For_Time_Select','KEY_ID_RIGHT':'InCrease_Time_For_Time_Select','KEY_ID_CHANGE':'Change_Time_Select_Id','KEY_ID_SET':'Change_Time_For_Set_Time','KEY_ID_CANCEL':'GoTo_Menu_Page'}
++for btn,handler in routes.items():
++    assert re.search(r'\{\s*'+btn+r'\s*,KEY_STATUS_SHORT\s*,page_time\s*,'+handler,key)
++defs='\n'.join(x for x in header.splitlines() if x.startswith('#define PCF8563_'))
++a=header.index('typedef struct');b=header.index('} PCF8563_TimeTypeDef;',a)+len('} PCF8563_TimeTypeDef;')
++code=r'''
++#include <stdint.h>
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++typedef struct {unsigned id;} I2C_HandleTypeDef;
++typedef enum {HAL_OK=0,HAL_ERROR=1,HAL_BUSY=2,HAL_TIMEOUT=3} HAL_StatusTypeDef;
++static I2C_HandleTypeDef hi2c2={2};
++static uint32_t tick=0;
++uint32_t HAL_GetTick(void){return tick;}
++static unsigned checks=0;
++#define CHECK(x) do {assert(x);checks++;} while(0)
++static uint8_t registers[256],reg_pointer;
++static unsigned tx_calls=0,rx_calls=0,write_calls=0;
++static uint8_t fail_tx=0,fail_rx=0;
++HAL_StatusTypeDef HAL_I2C_Master_Transmit(I2C_HandleTypeDef *h,uint16_t addr,uint8_t *data,uint16_t n,uint32_t timeout){
++    CHECK(h==&hi2c2 && addr==0xA2 && timeout<=100U && data && n>=1 && n<=8);
++    tx_calls++;if(fail_tx)return HAL_TIMEOUT;reg_pointer=data[0];
++    if(n>1){CHECK((unsigned)data[0]+n-1<=256);memcpy(registers+data[0],data+1,n-1);write_calls++;}
++    return HAL_OK;
++}
++HAL_StatusTypeDef HAL_I2C_Master_Receive(I2C_HandleTypeDef *h,uint16_t addr,uint8_t *data,uint16_t n,uint32_t timeout){
++    CHECK(h==&hi2c2 && addr==0xA3 && timeout<=100U && data && n==7);
++    rx_calls++;if(fail_rx)return HAL_TIMEOUT;memcpy(data,registers+reg_pointer,n);return HAL_OK;
++}
++'''+defs+'\n'+header[a:b]+'\n'
++for sig in ['uint8_t PCF8563_DaysInMonth(', 'uint8_t PCF8563_TimeIsValid(', 'uint8_t PCF8563_Weekday(', 'void PCF8563_NormalizeEdit(', 'static uint8_t PCF8563_BCDIsValid(', 'uint8_t DEC_to_BCD(', 'uint8_t BCD_to_DEC(', 'uint8_t PCF8563_SetTime(', 'uint8_t PCF8563_GetTime(']:
++    code+=extract(rtc,sig)
++code+=r'''
++uint8_t Set_Time[6],Set_Time_Select,Set_Time_Select_History,Set_Time_Error;
++static unsigned beeps=0,page_id=99;
++#define page_menu 3
++void Beep_Ctrl(unsigned ms,unsigned n){CHECK(ms==100);beeps=n;}
++void set_PageId(unsigned p){page_id=p;}
++#define FONT_8X16 1
++#define FONT_6X8 2
++static char pixels[8][128],last_text[80];
++static uint8_t lines[6];
++void OLED_PrintString(unsigned x,unsigned y,char *text,unsigned font){
++    unsigned width=font==FONT_8X16?8U:6U,i;
++    CHECK(y+(font==FONT_8X16?2U:1U)<=8 && x+strlen(text)*width<=128);
++    for(i=0;i<strlen(text);i++)pixels[y][x+i*width]=text[i];
++    snprintf(last_text,sizeof(last_text),"%s",text);
++}
++void OLED_PrintLine(unsigned a,unsigned b,unsigned y,uint8_t data){
++    unsigned index;
++    CHECK(a<b && b<=128 && (y==4 || y==7));
++    index=(y==4?0U:3U)+(a==20?0U:a==60?1U:2U);lines[index]=data;
++}
++static const char power_0_ico[16]={0},power_1_ico[16]={1},power_2_ico[16]={2},power_3_ico[16]={3},power_4_ico[16]={4},power_n_ico[16]={5};
++static uint8_t fake_level=2,last_icon=99;static unsigned samples=0,draws=0;
++uint16_t ADC_ReadChannel9(void){samples++;return 1234;}
++uint8_t Get_Driver_Power(uint16_t value){CHECK(value==1234);return fake_level;}
++void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,uint8_t *bitmap){
++    CHECK(x==105 && y==0 && w==16 && h==8);last_icon=bitmap[0];draws++;
++}
++'''
++a=oled.index('#define BATTERY_SAMPLE_PERIOD_MS');b=oled.index('/*************************',a)
++code+=oled[a:b]
++for sig in ['void Time_Set_Page_Init(', 'void Time_Set_Page_Reflash(']:code+=extract(oled,sig)
++for sig in ['void Reduce_Time_For_Time_Select(', 'void InCrease_Time_For_Time_Select(', 'void Change_Time_Select_Id(', 'void Change_Time_For_Set_Time(']:code+=extract(key,sig)
++oracles=[]
++for y in range(100):
++    for month in range(1,13):
++        start=datetime.date(2000+y,month,1)
++        end=datetime.date(2000+y+(month==12),1 if month==12 else month+1,1)
++        oracles.append('{%d,%d}'%((end-start).days,(start.weekday()+1)%7))
++code+='static const uint8_t calendar_oracle[1200][2]={'+','.join(oracles)+'};\n'
++code+=r'''
++static void edit(uint8_t y,uint8_t mo,uint8_t day,uint8_t h,uint8_t mi,uint8_t sec){
++    Set_Time[0]=y;Set_Time[1]=mo;Set_Time[2]=day;Set_Time[3]=h;Set_Time[4]=mi;Set_Time[5]=sec;
++}
++static void test_calendar(void){
++    unsigned y,m,d,index;uint8_t expected;
++    for(y=0;y<100;y++)for(m=1;m<=12;m++){
++        index=y*12U+m-1U;CHECK(PCF8563_DaysInMonth((uint8_t)y,(uint8_t)m,0)==calendar_oracle[index][0]);
++        for(d=1;d<=calendar_oracle[index][0];d++){
++            expected=(uint8_t)((calendar_oracle[index][1]+d-1)%7);
++            CHECK(PCF8563_Weekday((uint8_t)y,(uint8_t)m,(uint8_t)d)==expected);
++            edit((uint8_t)y,(uint8_t)m,(uint8_t)d,23,59,59);Set_Time_Select=2;
++            InCrease_Time_For_Time_Select();CHECK(Set_Time[2]==(d==calendar_oracle[index][0]?1:d+1));
++            Reduce_Time_For_Time_Select();CHECK(Set_Time[2]==d);
++        }
++    }
++    CHECK(PCF8563_DaysInMonth(0,2,0)==29 && PCF8563_DaysInMonth(0,2,1)==28);
++    CHECK(PCF8563_DaysInMonth(26,0,0)==0 && PCF8563_DaysInMonth(26,13,0)==0);
++    edit(24,2,29,0,0,0);Set_Time_Select=0;InCrease_Time_For_Time_Select();CHECK(Set_Time[0]==25 && Set_Time[2]==28);
++    edit(26,1,31,0,0,0);Set_Time_Select=1;InCrease_Time_For_Time_Select();CHECK(Set_Time[1]==2 && Set_Time[2]==28);
++    edit(26,12,31,0,0,0);Set_Time_Select=1;InCrease_Time_For_Time_Select();CHECK(Set_Time[1]==1);Reduce_Time_For_Time_Select();CHECK(Set_Time[1]==12);
++    edit(99,1,1,0,0,0);Set_Time_Select=0;InCrease_Time_For_Time_Select();CHECK(Set_Time[0]==0);Reduce_Time_For_Time_Select();CHECK(Set_Time[0]==99);
++    for(index=0;index<6;index++)for(d=0;d<256;d++){
++        PCF8563_TimeTypeDef t={0};
++        edit(26,11,24,12,30,15);Set_Time[index]=(uint8_t)d;Set_Time_Select=(uint8_t)index;
++        InCrease_Time_For_Time_Select();Reduce_Time_For_Time_Select();
++        t.year=Set_Time[0];t.month=Set_Time[1];t.day=Set_Time[2];t.hour=Set_Time[3];t.minute=Set_Time[4];t.second=Set_Time[5];
++        CHECK(PCF8563_TimeIsValid(&t));
++    }
++    Set_Time_Select=255;InCrease_Time_For_Time_Select();CHECK(Set_Time_Select==0);
++    Set_Time_Select=255;Change_Time_Select_Id();CHECK(Set_Time_Select==0);
++    Set_Time_Select=5;Change_Time_Select_Id();CHECK(Set_Time_Select==0);
++    puts("CG39 calendar: PASS; 2000..2099 date/weekday oracle, all field-byte inputs, wrap, leap-year and month clamping");
++}
++static void good_rtc(void){
++    PCF8563_TimeTypeDef t={26,11,24,2,12,30,15,0};fail_tx=fail_rx=0;
++    CHECK(PCF8563_SetTime(&hi2c2,&t)==HAL_OK);
++}
++static void bad_read(unsigned offset,uint8_t value){
++    PCF8563_TimeTypeDef output,before;good_rtc();registers[2+offset]=value;
++    memset(&output,0xA5,sizeof(output));before=output;
++    CHECK(PCF8563_GetTime(&hi2c2,&output)!=HAL_OK && memcmp(&output,&before,sizeof(output))==0);
++}
++static void test_rtc_and_editor(void){
++    PCF8563_TimeTypeDef t,backup;unsigned before,i;
++    good_rtc();Time_Set_Page_Init();CHECK(Set_Time[0]==26 && Set_Time[1]==11 && Set_Time[2]==24 && Set_Time_Error==0);
++    edit(26,11,24,22,58,59);page_id=99;Change_Time_For_Set_Time();
++    CHECK(page_id==page_menu && Set_Time_Error==0 && beeps==1);
++    CHECK(registers[2]==0x59 && registers[3]==0x58 && registers[4]==0x22 && registers[5]==0x24);
++    CHECK(registers[6]==2 && registers[7]==0x11 && registers[8]==0x26);
++    CHECK(PCF8563_GetTime(&hi2c2,&t)==HAL_OK && t.weekday==2 && t.century==0);
++    before=write_calls;edit(26,2,29,0,0,0);Change_Time_For_Set_Time();CHECK(Set_Time_Error==2 && write_calls==before);
++    edit(26,11,24,12,30,15);fail_tx=1;page_id=99;Change_Time_For_Set_Time();
++    CHECK(Set_Time_Error==3 && beeps==3 && page_id==99);fail_tx=0;
++    Change_Time_For_Set_Time();CHECK(Set_Time_Error==0 && page_id==page_menu);
++    bad_read(0,0x80);bad_read(1,0x1A);bad_read(2,0x24);bad_read(3,0);bad_read(4,7);bad_read(5,0);bad_read(6,0xFF);
++    good_rtc();registers[5]=0x31;registers[7]=0x04;CHECK(PCF8563_GetTime(&hi2c2,&t)!=HAL_OK);
++    good_rtc();fail_rx=1;memset(&t,0xA5,sizeof(t));backup=t;
++    CHECK(PCF8563_GetTime(&hi2c2,&t)!=HAL_OK && memcmp(&t,&backup,sizeof(t))==0);
++    Time_Set_Page_Init();CHECK(Set_Time_Error==1 && Set_Time[0]==0 && Set_Time[1]==1 && Set_Time[2]==1);
++    Time_Set_Page_Reflash();CHECK(strstr(last_text,"RTC READ ERROR")!=0);
++    InCrease_Time_For_Time_Select();CHECK(Set_Time_Error==0);
++    Measurement_Time_Refresh();CHECK(strcmp(last_text,"--/--/-- --:--")==0);fail_rx=0;
++    good_rtc();Measurement_Time_Refresh();CHECK(strcmp(last_text,"26/11/24 12:30")==0);
++    registers[7]|=0x80;Time_Set_Page_Init();CHECK(Set_Time_Error==1);good_rtc();
++    edit(26,11,24,12,30,15);Set_Time_Select=255;Set_Time_Select_History=255;
++    for(i=0;i<6;i++)pixels[i<3?2:5][(i%3)*40+36]='9';
++    Time_Set_Page_Reflash();CHECK(Set_Time_Select==0);
++    for(i=0;i<6;i++)CHECK(pixels[i<3?2:5][(i%3)*40+36]==' ');
++    for(i=0;i<6;i++){
++        unsigned j;Set_Time_Select=(uint8_t)i;Set_Time_Select_History=255;Time_Set_Page_Reflash();
++        for(j=0;j<6;j++)CHECK(lines[j]==(i==j?1:0));
++    }
++    Set_Time[0]=255;Set_Time[1]=255;Set_Time[2]=255;Time_Set_Page_Reflash();CHECK(Set_Time[0]<=99 && Set_Time[1]==1 && Set_Time[2]==31);
++    t=(PCF8563_TimeTypeDef){26,0,1,0,0,0,0,0};before=tx_calls;CHECK(PCF8563_SetTime(&hi2c2,&t)!=HAL_OK && tx_calls==before);
++    CHECK(PCF8563_GetTime(&hi2c2,0)!=HAL_OK && PCF8563_SetTime(&hi2c2,0)!=HAL_OK);
++    puts("CG39 RTC/editor: PASS; register encoding, invalid BCD/date/VL, I2C failures, complete save fields, error/retry, 999 suffix erase, selection and OLED bounds");
++}
++static void battery_reset(void){Battery_Initialized=0;Battery_Force_Redraw=1;Battery_Last_Icon=255;samples=draws=0;}
++static void test_battery(void){
++    unsigned level,before;tick=0;fake_level=2;battery_reset();Measurement_Battery_Refresh();CHECK(last_icon==2 && samples==1 && draws==1);
++    Battery_Force_Redraw=1;Measurement_Battery_Refresh();CHECK(samples==1 && draws==2 && last_icon==2);
++    tick=4999;Measurement_Battery_Refresh();CHECK(samples==1);tick=5000;fake_level=1;Measurement_Battery_Refresh();CHECK(last_icon==1 && samples==2);
++    for(level=0;level<=4;level++){tick+=5000;fake_level=(uint8_t)level;Measurement_Battery_Refresh();CHECK(last_icon==level);}
++    tick+=5000;fake_level=0;Measurement_Battery_Refresh();CHECK(last_icon==0);before=samples;
++    tick+=499;Measurement_Battery_Refresh();CHECK(last_icon==0);tick++;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
++    Battery_Force_Redraw=1;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
++    tick+=500;Measurement_Battery_Refresh();CHECK(last_icon==0);
++    tick+=2500;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
++    tick+=1500;fake_level=3;Measurement_Battery_Refresh();CHECK(last_icon==3 && samples==before+1);
++    tick=UINT32_MAX-100;fake_level=0;battery_reset();Measurement_Battery_Refresh();before=samples;
++    tick+=500;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
++    tick+=4500;fake_level=4;Measurement_Battery_Refresh();CHECK(last_icon==4 && samples==before+1);
++    puts("CG39 battery: PASS; shared cached icons, immediate page redraw, five-second sampling, 500 ms blinking, recovery and tick wrap");
++}
++int main(void){test_calendar();test_rtc_and_editor();test_battery();printf("CG39 UI tests: PASS %u checks\n",checks);return 0;}
++'''
++with tempfile.TemporaryDirectory(prefix='cg39_') as tmp:
++    d=Path(tmp);source=d/'test.c';exe=d/('test.exe' if os.name=='nt' else 'test')
++    source.write_text(code,encoding='utf-8')
++    cmd=[os.environ.get('CC','cc'),'-std=c99','-O1','-Wall','-Wextra','-Werror','-fstack-protector-all','-fno-omit-frame-pointer']
++    if os.environ.get('HOST_SANITIZERS','1')!='0':cmd+=['-fsanitize=undefined']
++    subprocess.run(cmd+[str(source),'-o',str(exe)],check=True)
++    subprocess.run([str(exe)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
+--- a/变更日志.md
++++ b/变更日志.md
+@@ -1,9 +1,10 @@
+ # 数显轨距尺变更日志
+ 
+-当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG38 TEST / 2026-11-23** 主控测试版，配套 CG34 倾角板。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
++当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG39 TEST / 2026-11-24** 主控测试版，配套 CG34 倾角板。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
+ 
+ | 版本 | 主要变更 | 原始补丁 |
+ | --- | --- | --- |
++| [CG39 TEST](#cg39-test) | 两测量页统一电量；时间越界、字符残留、日期和 RTC 校验修复 | [CG39 增量差异](docs/patches/CG39_20261124_电量与时间设置修复.patch) |
+ | [CG38 TEST](#cg38-test) | 查护实时换算，共用轨距滤波，独立基准、稳定采集和可靠保存 | [CG38 增量差异](docs/patches/CG38_20261123_查照护背优化.patch) |
+ | [CG37 TEST](#cg37-test) | 标定页面恢复实时 AD，并显示已采集均值 | [CG37 增量差异](docs/patches/CG37_20261123_标定实时AD显示.patch) |
+ | [CG36 TEST](#cg36-test) | 标定判稳放宽到 6 AD、均值漂移检查、等待原因提示 | [CG36 增量差异](docs/patches/CG36_20261123_标定判稳.patch) |
+@@ -21,11 +22,19 @@
+ 
+ - Keil 工程为 [STM32L151 主控](STM32L151/MDK-ARM/STM32L151.uvprojx)和 [QINGJIAOBAN 倾角板](QINGJIAOBAN/PROJECT/GuiJuChi.uvprojx)。
+ - [B31 EEPROM 量产与实机验收](docs/guides/B31_20261104_量产操作说明.md)、[CG32 双板 Keil 验证](docs/guides/CG32_20261116_Keil实机验证指南.md)和 [B3 EEPROM 备份与迁移历史指南](docs/guides/B3_20261103_EEPROM备份与迁移操作指南.md)。
+-- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用当前超高专项、CG38 查护专项、采样调度、B31 EEPROM 与 B2 双板串口用例。
++- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用当前超高专项、CG38 查护专项、CG39 电量/时间专项、采样调度、B31 EEPROM 与 B2 双板串口用例。
+ 
+ ```sh
+ sh tests/CG32_HOST_TESTS/run_cg32_tests.sh
+ ```
++
++## CG39 TEST
++
++2026-11-24。修复查护页固定满电图标，与轨距/超高页共用电量缓存、刷新和低电量闪烁。第一次测量立即采样，切页立即重绘；电压采样固定 5 秒，闪烁 500 ms，沿用原电量平均和电压分档。
++
++针对时间加减出现几百/999，修复 RTC 读取失败后使用未初始化值、异常初值绕过等值边界判断，以及三位数回到两位数后旧第三位残留。设置范围为 2000～2099 年，字段独立循环，月/日从 1 开始，按大小月/闰年限制日期，改年月自动收敛超出的日；下划线重绘与索引防越界。保存完整初始化星期/世纪并验证参数，异常时明确提示且可重试。RTC 增加 BCD、日期与低电压检查，两测量页异常时显示时间占位。
++
++电量/时间专项 112643 项、查护专项 98484 项、原超高与标定显示、EEPROM 357 项、串口/判稳 91 项回归通过；主控 Keil 全量编译零错误、零警告。Windows GCC 功能测试无 UBSan，尚未执行烧录和实机走时/显示验证。测量与标定算法、EEPROM 参数未改。固件为 `firmware/CG39_TEST_20261124/STM32L151_CG39_TEST.hex`，操作及边界说明见 [CG39 电量与时间设置测试说明](docs/guides/CG39_20261124_电量与时间设置测试说明.md)。
+ 
+ ## CG38 TEST
+ 

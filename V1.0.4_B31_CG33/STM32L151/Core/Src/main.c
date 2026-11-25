@@ -30,7 +30,6 @@
 #include "App_oled.h"
 #include "App_Eep.h"
 #include "Algorithm_head.h"
-#include "agreement_head.h"
 volatile uint32_t Debug_Eep_Storage = 0;//*
 volatile uint32_t Debug_Eep_Record = 0;//*
 volatile uint32_t Debug_Eep_Warnings = 0;//*
@@ -153,32 +152,24 @@ int main(void)
   {
       /* [B2] Process complete UART packets in foreground. Never parse or TX in ISR. */
       UART_Process_Received(UART1_ID);
-      if (!UART2_PC_Bulk_Is_Busy()) UART_Process_Received(UART2_ID);
+      UART_Process_Received(UART2_ID);
       Agreement_Ack_For_Fun();//轨距尺上位机协议处理
       
       
-      if(U2_PC_Work_Mode == 1 && !UART2_PC_Bulk_Is_Busy())
+      if(U2_PC_Work_Mode == 1)
       {
           U2_Cycle_Send_Mode_Time_Current = HAL_GetTick();
           if((U2_Cycle_Send_Mode_Time_Current-U2_Cycle_Send_Mode_Time_History) >= 1000)
           {
               char buffer[96] = {0}; /* [B1] Bounded UART2 telemetry text. */
-              /* Do not emit old/default samples or unimplemented CH values.
-               * The wire format of valid Type:0 records is unchanged. */
-              if (get_PageId() == page_main && Sensor_Data_Is_Fresh() &&
-                  Eep_Get_Storage_State() == EEP_STATE_B3_VALID)
-              {
-                  int len;
-                  float gj = Get_GJ_Value(GJ_Ad, Temp);
-                  float cg = Get_CG_Value(CG_Ad, Temp);
-                  if (CG_Result_Status == CG_RESULT_OK && GJ_Result_Is_Valid())
-                  {
-                      len = snprintf(buffer,sizeof(buffer),
-                                     "Type:0|Data1:%.2f|Data2:%.2f|Temp:%.2f\r\n",gj,cg,Temp);
-                      if (len > 0 && (size_t)len < sizeof(buffer))
-                          UART_Send_Data(UART2_ID,(uint8_t*)buffer,(uint16_t)len);
-                  }
-              }
+              int len;
+              if(get_PageId() == page_main)
+                len = snprintf(buffer,sizeof(buffer),"Type:0|Data1:%.2f|Data2:%.2f|Temp:%.2f\r\n",GJ_Value,CG_Value,Temp);
+              else
+                len = snprintf(buffer,sizeof(buffer),"Type:1|Data1:%.2f|Data2:%.2f|Temp:%.2f\r\n",CZ_Value,HB_Value,Temp);
+              /* [B1] snprintf returns required bytes even if truncated. Never transmit partial data. */
+              if(len > 0 && (size_t)len < sizeof(buffer))
+                  UART_Send_Data(UART2_ID,(uint8_t*)buffer,(uint16_t)len);
               U2_Cycle_Send_Mode_Time_History = U2_Cycle_Send_Mode_Time_Current;
           }
       }
@@ -195,7 +186,6 @@ int main(void)
         Page_init();
       /*蜂鸣器响应*/
       Beep_Reflash();
-      UART2_PC_Bulk_Service();
   }
     /* USER CODE END WHILE */
 

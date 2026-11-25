@@ -1,0 +1,13 @@
+CG38 TEST / 2026-11-23
+基线 c97c4e9 / CG37 TEST；只更新 STM32L151 主控，配套现有 CG34 TEST 倾角板。
+主控全量编译：0 errors, 0 warnings。
+查护专项：98500 checks passed；EEPROM：357 assertions passed；UART/判稳：91 assertions passed。
+原超高计算/标定显示、倾角滤波202项、ADC161七组、CG34采样及B2倾角板协议回归通过。
+Windows GCC 15.1 功能测试，未启用 UBSan（该工具链没有运行库）。
+Intel HEX 校验和、地址范围和向量检查通过。
+Flash data range: 0x08000000..0x08009B83; 39812 bytes
+Initial SP: 0x200016F8; Reset: 0x0800010D
+未执行烧录和实机计量验证。机械比例/方向与具体接触面需实测。
+标定测试阈值：10帧、800ms、250ms断档、0.03mm峰峰值、0.01mm半窗均值差。
+历史查护参数需重新标定。保存相同AD后，旧固件回退需要兼容该校验规则。
+完整操作说明：docs/guides/CG38_20261123_查照护背测试说明.md

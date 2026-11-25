@@ -1,0 +1,10 @@
+CG36 TEST / 2026-11-23
+Keil ARMCC 5.06 update 7 build 960 mainboard rebuild PASS, 0 errors / 0 warnings.
+Windows GCC 15.1.0 UART and calibration stability regression PASS, 72 assertions.
+Cases cover 891 ms jittered window, 6 AD oscillating noise, >6 AD rejection,
+slow drift rejection, exact 2 AD mean drift boundary, 2.2 AD rejection,
+short windows, insufficient samples, stale link, tick wrap and 50,000 noise bytes.
+CG35 full-code sweeps and existing calculation/calibration/save integration PASS.
+Installed Windows GCC has no libubsan; functional tests ran with available options.
+Intel HEX checksums, vector table and flash addresses verified.
+Physical-board READY availability, zero accuracy and response time require testing.

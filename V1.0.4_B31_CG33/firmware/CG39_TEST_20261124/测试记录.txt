@@ -1,0 +1,10 @@
+CG39 TEST / 2026-11-24
+基线：43b6e2f / CG38 TEST。主控更新，配套现有 CG34 TEST 倾角板。
+Keil 全量编译：0 errors, 0 warnings。
+电量/时间112643 checks；查护98484 checks；EEPROM357 assertions；串口/判稳91 assertions；超高与标定显示回归通过。
+Windows GCC 功能测试未启用 UBSan，工具链缺少运行库。
+HEX 校验和/Flash地址/向量检查通过。
+Flash data: 0x08000000..0x08009E43; 40516 bytes
+SP=0x200016F8; Reset=0x0800010D
+未执行硬件烧录、按键/显示和 RTC 断电走时验证。
+说明：docs/guides/CG39_20261124_电量与时间设置测试说明.md

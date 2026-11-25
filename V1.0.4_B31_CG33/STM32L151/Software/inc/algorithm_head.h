@@ -19,10 +19,12 @@ extern volatile uint8_t CG_Result_Status;
 void CG_Data_Init(void);
 float Get_CG_Value(int16_t CG_Ad,float temp);
 
-/* GJ validity pertains to the last calculation; check link/storage separately.
- * Never display or export the 0.0f error sentinel as a measurement. */
 float Get_GJ_Value(uint16_t GJ_Ad,float temp);
-uint8_t GJ_Result_Is_Valid(void);
+/* [CG38] Shared displacement scale, independent CH reference positions. */
+#define CH_CZ_REFERENCE_MM 1391.0f
+#define CH_HB_REFERENCE_MM 1348.0f
+uint8_t GJ_Get_Valid_Scale(float *scale);
+uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb);
 
 
 uint8_t Get_Driver_Power(uint16_t PowerAd);

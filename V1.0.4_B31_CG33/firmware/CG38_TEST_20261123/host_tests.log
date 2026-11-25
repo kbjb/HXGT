@@ -1,0 +1,22 @@
+Windows GCC functional tests; UBSan is unavailable in this toolchain.
+tests/CG38_HOST_TESTS/test_ch.py
+CG38 math: PASS; full positive ADC sweep, shared gauge scale, independent/equal zeros, signed deltas, reversed slope, invalid data
+CG38 calibration: PASS; live vs captured AD, window reset, equal zeros, save confirmation/failure/retry, stale/temperature guards, OLED bounds
+CG38 measurement: PASS; live values, precision, reentry, link loss/recovery, EEPROM/ADC/calibration errors
+CG38 CH tests: PASS 98500 checks
+tests/CG_FIX_HOST_TESTS/test_cg.py
+CG35 zero edges: PASS; full 16-bit sweeps, both zero orders, endpoints, direction, temperature
+CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference
+CG key: PASS; save not premature, failed/implausible saves rejected
+CG37 calibration display: PASS; live AD on 10 states, full signed range, saved means, wait reasons, 128x64 nonoverlap
+B3.1 EEPROM production tests: PASS 357 assertions; 64KiB blank scan, init recovery, A/B persistence, 100 records, nonblank lock, I2C/WP/powerloss, disjoint layout.
+B2 HOST: PASS 72 assertions; UART1 bad=181 dropped=1; UART2 bad=3; 50,000 noise bytes; no IRQ TX
+CG38 UART/capture checks included: 91 assertions total
+CG integration static checks: PASS; EEPROM production switches unchanged
+tests/CG34_HOST_TESTS/test_sampling.py
+CG34 sampling: PASS; 50 Hz, missed-slot recovery, no catch-up burst, tick wrap
+tests/B2_HOST_TESTS/test_qing.py
+B2 QING: PASS; ACK ok=3 error=1, 120,000 noise bytes, 100ms scheduler
+CG32 filter: PASS (202 checks, -32768..32767, 2 AD, spike/return)
+CG32 ADC161 bitstream: PASS (7 full-sign cases, 18 clocks)
+ALL REQUESTED HOST CHECKS PASSED

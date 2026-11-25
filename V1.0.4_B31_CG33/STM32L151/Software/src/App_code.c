@@ -1,5 +1,4 @@
 #include "App_oled.h"
-#include <string.h>
 #include "pcf8563_head.h"
 #include "Algorithm_head.h"
 #include "agreement_head.h" /* [CG32-04] sensor-frame freshness */
@@ -10,7 +9,6 @@ static PAGE_FUN_T Page_Fun_Buffere[page_size];
 /* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
 static uint8_t Main_Values_Need_Redraw = 1U;
 static uint8_t CG_Display_Status_History = 0xFFU;
-static uint8_t GJ_Display_Status_History = 0xFFU;
 
 
 
@@ -32,19 +30,83 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG34-RC2",FONT_8X16);
+    OLED_PrintString(40,4,"CG39 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
     }
 }
 
+extern I2C_HandleTypeDef hi2c2;
+/* [CG39] Shared measurement-page battery state. Sampling is independent
+ * from low-battery blinking, and entering a page redraws the cached level. */
+#define BATTERY_SAMPLE_PERIOD_MS 5000U
+#define BATTERY_BLINK_PERIOD_MS   500U
+static uint8_t Battery_Initialized=0U, Battery_Level=0U;
+static uint8_t Battery_Visible=1U, Battery_Force_Redraw=1U;
+static uint8_t Battery_Last_Icon=0xFFU;
+static uint32_t Battery_Sample_Tick=0U, Battery_Blink_Tick=0U;
+
+static void Measurement_Battery_Refresh(void)
+{
+    uint32_t now=HAL_GetTick();
+    uint8_t redraw=Battery_Force_Redraw;
+    uint8_t icon;
+    const char *bitmap;
+    if (!Battery_Initialized || (uint32_t)(now-Battery_Sample_Tick)>=BATTERY_SAMPLE_PERIOD_MS)
+    {
+        uint8_t previous=Battery_Level;
+        Battery_Level=Get_Driver_Power(ADC_ReadChannel9());
+        Battery_Sample_Tick=now;
+        if (!Battery_Initialized || previous!=Battery_Level)
+        {
+            Battery_Visible=1U;
+            Battery_Blink_Tick=now;
+            redraw=1U;
+        }
+        Battery_Initialized=1U;
+    }
+    if (Battery_Level==0U && (uint32_t)(now-Battery_Blink_Tick)>=BATTERY_BLINK_PERIOD_MS)
+    {
+        uint32_t periods=(uint32_t)(now-Battery_Blink_Tick)/BATTERY_BLINK_PERIOD_MS;
+        if ((periods&1U)!=0U) Battery_Visible=1U-Battery_Visible;
+        Battery_Blink_Tick+=periods*BATTERY_BLINK_PERIOD_MS;
+    }
+    icon=Battery_Level==0U && !Battery_Visible ? 5U : Battery_Level;
+    if (redraw || icon!=Battery_Last_Icon)
+    {
+        switch(icon)
+        {
+            case 0U: bitmap=power_0_ico; break;
+            case 1U: bitmap=power_1_ico; break;
+            case 2U: bitmap=power_2_ico; break;
+            case 3U: bitmap=power_3_ico; break;
+            case 4U: bitmap=power_4_ico; break;
+            default: bitmap=power_n_ico; break;
+        }
+        OLED_ShowImage(105,0,16,8,(uint8_t *)bitmap);
+        Battery_Last_Icon=icon;
+    }
+    Battery_Force_Redraw=0U;
+}
+
+static void Measurement_Time_Refresh(void)
+{
+    PCF8563_TimeTypeDef time;
+    char text[20];
+    if (PCF8563_GetTime(&hi2c2,&time)==HAL_OK && time.century==0U)
+        snprintf(text,sizeof(text),"%02u/%02u/%02u %02u:%02u",(unsigned)time.year,
+                 (unsigned)time.month,(unsigned)time.day,(unsigned)time.hour,(unsigned)time.minute);
+    else snprintf(text,sizeof(text),"--/--/-- --:--");
+    OLED_PrintString(5,0,text,FONT_6X8);
+}
+
 /*************************主界面***************************/
 void Main_Page_Init(void)
 {
+    Battery_Force_Redraw=1U;
     Main_Values_Need_Redraw = 1U;
     CG_Display_Status_History = 0xFFU;
-    GJ_Display_Status_History = 0xFFU;
     CG_Value_History = 0;
     GJ_Value_History = 0;
     left_And_Righe_Status_History = 1-left_And_Righe_Status;
@@ -56,78 +118,30 @@ void Main_Page_Init(void)
 
 
 extern I2C_HandleTypeDef hi2c2;
-
-/* Shared main/CH header: at most one RTC transaction per second, and
- * redraw the header on page entry or on visible clock/status changes. */
-static uint32_t RTC_LastPoll;
-static uint8_t RTC_Polled;
-static uint8_t RTC_HeaderRedraw = 1U;
-static char RTC_Header[16];
-
-static void RTC_ReflashHeader(void)
-{
-    uint32_t now = HAL_GetTick();
-    if (!RTC_Polled || (uint32_t)(now - RTC_LastPoll) >= 1000U)
-    {
-        PCF8563_TimeTypeDef time;
-        char next[sizeof(RTC_Header)] = "RTC ERR       ";
-        RTC_LastPoll = now;
-        RTC_Polled = 1U;
-        if (PCF8563_GetTime(&hi2c2, &time) == HAL_OK &&
-            time.year <= 99U && time.month >= 1U && time.month <= 12U &&
-            time.day >= 1U && time.day <= 31U && time.hour < 24U &&
-            time.minute < 60U)
-            snprintf(next, sizeof(next), "%02u/%02u/%02u %02u:%02u",
-                     (unsigned)time.year, (unsigned)time.month, (unsigned)time.day,
-                     (unsigned)time.hour, (unsigned)time.minute);
-        if (strcmp(RTC_Header, next) != 0)
-        {
-            strcpy(RTC_Header, next);
-            RTC_HeaderRedraw = 1U;
-        }
-    }
-    if (RTC_HeaderRedraw)
-    {
-        OLED_PrintString(5, 0, RTC_Header, FONT_6X8);
-        RTC_HeaderRedraw = 0U;
-    }
-}
-
-static int8_t  Power_0_Ico_Show_Timer_Status = 0;
-static uint16_t Power_Ico_Show_Timer_Freq = 5000;
-static uint32_t Power_Ico_Show_Timer_History = 0;
-static uint32_t Power_Ico_Show_Timer_Now = 0;
 void Main_Page_Reflash(void)
 {
     char buffer[20];
-    uint8_t fresh = Sensor_Data_Is_Fresh();
-    uint8_t eep_valid = (uint8_t)(Eep_Get_Storage_State() == EEP_STATE_B3_VALID);
-    uint8_t gj_state;
-    GJ_Value = Get_GJ_Value(GJ_Ad, Temp);
-    gj_state = !eep_valid ? CG_RESULT_EEP_ERROR :
-               ((!fresh || GJ_Ad > 0x7FFFU) ? CG_RESULT_NO_SENSOR :
-                (GJ_Result_Is_Valid() ? CG_RESULT_OK : CG_RESULT_CAL_ERROR));
-    if (Main_Values_Need_Redraw || GJ_Display_Status_History != gj_state ||
-        (gj_state == CG_RESULT_OK && GJ_Value_History != GJ_Value))
+    /*显示轨距数值*/
+    GJ_Value = Get_GJ_Value(GJ_Ad,Temp);
+    //获取轨距数据
+    if(Main_Values_Need_Redraw || GJ_Value_History != GJ_Value)
     {
-        OLED_PrintString(52,2,"         ",FONT_8X16);
-        if (gj_state == CG_RESULT_OK)
-            snprintf(buffer,sizeof(buffer),Data_Show_Percision == 1 ? "%+.2f" : "%+.1f",GJ_Value);
+        if(Data_Show_Percision == 1)
+            snprintf(buffer,sizeof(buffer),"%+.2f",GJ_Value);
         else
-            snprintf(buffer,sizeof(buffer),"%s",gj_state == CG_RESULT_EEP_ERROR ? "EEP ERR" :
-                     (gj_state == CG_RESULT_NO_SENSOR ? "NO SENSOR" : "CAL ERROR"));
+            snprintf(buffer,sizeof(buffer),"%+.1f",GJ_Value);
         OLED_PrintString(52,2,buffer,FONT_8X16);
-        GJ_Display_Status_History = gj_state;
-        GJ_Value_History = GJ_Value;
+        GJ_Value_History  =  GJ_Value;
     }
-
+    
+    /*显示超高数值*/
     /* [CG32-04] Error status takes precedence over a numeric zero.
      * Leave the raw CG_Ad and CG_Value_t available in Keil Watch. */
     CG_Value = Get_CG_Value(CG_Ad,Temp);
     {
         uint8_t state = CG_Result_Status;
-        if (!fresh) state = CG_RESULT_NO_SENSOR;
-        if (!eep_valid)
+        if (!Sensor_Data_Is_Fresh()) state = CG_RESULT_NO_SENSOR;
+        if (Eep_Get_Storage_State() != EEP_STATE_B3_VALID)
             state = CG_RESULT_EEP_ERROR;
         if (Main_Values_Need_Redraw ||
             CG_Display_Status_History != state ||
@@ -160,44 +174,8 @@ void Main_Page_Reflash(void)
     }
 
     Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
-    /*显示时间*/
-    //获取时间数据
-    RTC_ReflashHeader();
-    
-    
-    Power_Ico_Show_Timer_Now =HAL_GetTick();
-    if((Power_Ico_Show_Timer_Now - Power_Ico_Show_Timer_History)>Power_Ico_Show_Timer_Freq)
-    {
-        uint8_t Driver_Power_Level = Get_Driver_Power(ADC_ReadChannel9());
-        /*显示电量信息*/
-        if(Driver_Power_Level == 0)
-        {
-            Power_Ico_Show_Timer_Freq = 500;
-            Power_0_Ico_Show_Timer_Status = 1-Power_0_Ico_Show_Timer_Status;
-            if(Power_0_Ico_Show_Timer_Status == 0)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_0_ico);
-            else
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_n_ico);
-        }
-        else
-        {
-            Power_Ico_Show_Timer_Freq = 5000;
-            if(Driver_Power_Level == 4)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
-            else if(Driver_Power_Level == 3)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_3_ico);
-            else if(Driver_Power_Level == 2)
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_2_ico);
-            else
-                OLED_ShowImage(105,0,16,8,(uint8_t*)power_1_ico);
-        }
-        Power_Ico_Show_Timer_History = Power_Ico_Show_Timer_Now;
-    }
-    
-    
-    
-    
-    /*显示目标提示*/
+    Measurement_Time_Refresh();
+    Measurement_Battery_Refresh();
     if(Goal_Set_Status == 1)
     {
         OLED_PrintString(5,1,"MUBIAO",FONT_6X8);
@@ -207,7 +185,7 @@ void Main_Page_Reflash(void)
         {
             Beep_Ctrl(100,3);
         }
-        if(gj_state == CG_RESULT_OK && GJ_Value>Goal_CJ_Min_Value&&GJ_Value<Goal_CJ_Max_Value)
+        if(GJ_Value>Goal_CJ_Min_Value&&GJ_Value<Goal_CJ_Max_Value)
         {
             Beep_Ctrl(100,3);
         }
@@ -234,133 +212,187 @@ void Main_Page_Reflash(void)
 
 /*************************查照护背界面***************************/
 
+static float CZ_Value_S = 0,HB_Value_S = 0;
+static uint8_t CH_Display_Status_History=0xFFU;
+static uint8_t CH_Values_Need_Redraw=1U;
 void CH_Page_Init(void)
 {
+    Battery_Force_Redraw=1U;
+    CZ_Value_S = 0,HB_Value_S = 0;
+    CH_Display_Status_History=0xFFU;
+    CH_Values_Need_Redraw=1U;
     OLED_PrintChinese(5,2,"查照");
     OLED_PrintString(44,2,":",FONT_8X16);
     OLED_PrintChinese(5,5,"护背");
     OLED_PrintString(44,5,":",FONT_8X16);
-    /* This checkout has no live CZ/HB producers. Never show demo numbers. */
-    OLED_PrintString(52,2,"NOT READY",FONT_8X16);
-    OLED_PrintString(52,5,"NOT READY",FONT_8X16);
 }
 
 
 void CH_Page_Reflash(void)
 {
-    RTC_ReflashHeader();
-    /*显示电量数据*/
-    OLED_ShowImage(105,0,16,8,(uint8_t*)power_4_ico);
+    char buffer[20];
+    uint8_t state=0U;
+    const char *error="";
+    if (!Sensor_Data_Is_Fresh()) { state=1U; error="NO SENSOR"; }
+    else if (Eep_Get_Storage_State()!=EEP_STATE_B3_VALID) { state=2U; error="EEP ERROR"; }
+    else if (GJ_Ad==0U || GJ_Ad>0x7FFFU) { state=3U; error="AD ERROR "; }
+    else if (!Get_CH_Values(GJ_Ad,&CZ_Value,&HB_Value)) { state=4U; error="CAL ERROR"; }
+    if (CH_Display_Status_History!=state)
+    {
+        OLED_PrintString(52,2,"         ",FONT_8X16);
+        OLED_PrintString(52,5,"         ",FONT_8X16);
+        CH_Values_Need_Redraw=1U;
+        CH_Display_Status_History=state;
+    }
+    if (state!=0U)
+    {
+        if (CH_Values_Need_Redraw)
+        {
+            OLED_PrintString(52,2,(char *)error,FONT_8X16);
+            OLED_PrintString(52,5,(char *)error,FONT_8X16);
+        }
+    }
+    else
+    {
+        if (CH_Values_Need_Redraw || CZ_Value_S!=CZ_Value)
+        {
+            int length=snprintf(buffer,sizeof(buffer),Data_Show_Percision==1 ? "%+.2f" : "%+.1f",CZ_Value);
+            /* Pad in one write: erase old digits without blanking the row. */
+            if (length<0 || length>9) snprintf(buffer,sizeof(buffer),"RANGE    ");
+            else { while(length<9) buffer[length++]=' '; buffer[9]='\0'; }
+            OLED_PrintString(52,2,buffer,FONT_8X16);
+            CZ_Value_S=CZ_Value;
+        }
+        if (CH_Values_Need_Redraw || HB_Value_S!=HB_Value)
+        {
+            int length=snprintf(buffer,sizeof(buffer),Data_Show_Percision==1 ? "%+.2f" : "%+.1f",HB_Value);
+            /* Pad in one write: erase old digits without blanking the row. */
+            if (length<0 || length>9) snprintf(buffer,sizeof(buffer),"RANGE    ");
+            else { while(length<9) buffer[length++]=' '; buffer[9]='\0'; }
+            OLED_PrintString(52,5,buffer,FONT_8X16);
+            HB_Value_S=HB_Value;
+        }
+    }
+    CH_Values_Need_Redraw=0U;
+    Measurement_Time_Refresh();
+    Measurement_Battery_Refresh();
 }
 
 /************************菜单选择界面***************************/
 
-/* Four two-byte GBK glyphs plus a terminating NUL per menu label. */
-static char Menu_buffer[MENU_ID_NUMBER][9] = {"时间设置","目标设置","标定设置","密码设置","精度设置"};
-static void Menu_Draw_Labels(uint8_t first)
-{
-    uint8_t row;
-    for (row = 0U; row < 3U; ++row)
-        OLED_PrintChinese(32U, (uint8_t)(1U + 2U * row), Menu_buffer[first + row]);
-}
-
+static int8_t  menu_Show_Start;
+char Menu_buffer[MENU_ID_NUMBER][8] = {"时间设置","目标设置","标定设置","密码设置","精度设置"};
 void Menu_Page_Init(void)
 {
-    menu_Id_History = 0U;
-    menu_Id_Select = 0U;
+    char buffer[8];
+    menu_Id_History = 0;
+    menu_Id_Select = 0;
+    menu_Show_Start  = 0;
     OLED_PrintString(16,1,"->",FONT_8X16);
-    Menu_Draw_Labels(0U);
+    for(uint8_t i=0;i<8;i++)
+        buffer[i] = Menu_buffer[0][i];
+    OLED_PrintChinese(32,1,buffer);
+    for(uint8_t i=0;i<8;i++)
+        buffer[i] = Menu_buffer[1][i];
+    OLED_PrintChinese(32,3,buffer);
+    for(uint8_t i=0;i<8;i++)
+        buffer[i] = Menu_buffer[2][i];
+    OLED_PrintChinese(32,5,buffer);
 }
+
 
 void Menu_Page_Reflash(void)
 {
-    uint8_t first;
-    if (menu_Id_Select >= MENU_ID_NUMBER) menu_Id_Select = MENU_ID_NUMBER - 1U;
-    if (menu_Id_History == menu_Id_Select) return;
-    first = (menu_Id_Select > 2U) ? (uint8_t)(menu_Id_Select - 2U) : 0U;
-    OLED_PrintString(16,1,"  ",FONT_8X16);
-    OLED_PrintString(16,3,"  ",FONT_8X16);
-    OLED_PrintString(16,5,"  ",FONT_8X16);
-    OLED_PrintString(16, (uint8_t)(1U + 2U * (menu_Id_Select - first)), "->", FONT_8X16);
-    Menu_Draw_Labels(first);
-    menu_Id_History = menu_Id_Select;
+    char buffer[8];
+    if(menu_Id_History != menu_Id_Select)
+    {
+        if(menu_Id_Select>MENU_ID_NUMBER)menu_Id_Select = MENU_ID_NUMBER;
+        OLED_PrintString(16,1,"  ",FONT_8X16);
+        OLED_PrintString(16,3,"  ",FONT_8X16);
+        OLED_PrintString(16,5,"  ",FONT_8X16);
+        if(menu_Id_Select>2)
+        {
+            menu_Show_Start = menu_Id_Select-2;
+            OLED_PrintString(16,5,"->",FONT_8X16);
+        }
+        else
+        {
+            menu_Show_Start = 0;
+            OLED_PrintString(16,(menu_Id_Select<<1)+1,"->",FONT_8X16);
+        }
+//        OLED_PrintChinese(32,1,Menu_buffer[menu_start]);
+//        OLED_PrintChinese(32,3,Menu_buffer[menu_start+1]);
+//        OLED_PrintChinese(32,5,Menu_buffer[menu_start+2]);
+        
+        
+        for(uint8_t i=0;i<8;i++)
+            buffer[i] = Menu_buffer[menu_Show_Start][i];
+        OLED_PrintChinese(32,1,buffer);
+        for(uint8_t i=0;i<8;i++)
+            buffer[i] = Menu_buffer[menu_Show_Start+1][i];
+        OLED_PrintChinese(32,3,buffer);
+        for(uint8_t i=0;i<8;i++)
+            buffer[i] = Menu_buffer[menu_Show_Start+2][i];
+        OLED_PrintChinese(32,5,buffer);
+        
+        
+        menu_Id_History = menu_Id_Select;
+    }
+    
 }
 
 /************************时间设置界面***************************/
 
 void Time_Set_Page_Init(void)
 {
-    PCF8563_TimeTypeDef timeT = {0};
-    if (PCF8563_GetTime(&hi2c2,&timeT) != HAL_OK)
+    PCF8563_TimeTypeDef timeT;
+    uint8_t i;
+    static const uint8_t fallback[6]={0,1,1,0,0,0};
+    Set_Time_Error=0U;
+    for (i=0U;i<6U;++i) Set_Time[i]=fallback[i];
+    if (PCF8563_GetTime(&hi2c2,&timeT)==HAL_OK && timeT.century==0U)
     {
-        /* Initialize an editable date rather than showing stack garbage. */
-        timeT.month = 1U;
-        timeT.day = 1U;
+        Set_Time[0]=timeT.year; Set_Time[1]=timeT.month; Set_Time[2]=timeT.day;
+        Set_Time[3]=timeT.hour; Set_Time[4]=timeT.minute; Set_Time[5]=timeT.second;
     }
+    else Set_Time_Error=1U;
+    PCF8563_NormalizeEdit(Set_Time);
     OLED_PrintString(9,2,"Y",FONT_8X16);
     OLED_PrintString(49,2,"M",FONT_8X16);
     OLED_PrintString(89,2,"D",FONT_8X16);
     OLED_PrintString(9,5,"h",FONT_8X16);
     OLED_PrintString(49,5,"m",FONT_8X16);
     OLED_PrintString(89,5,"s",FONT_8X16);
-    
-    Set_Time[0]     = timeT.year;
-    Set_Time[1]     = timeT.month;
-    Set_Time[2]     = timeT.day;
-    Set_Time[3]     = timeT.hour;
-    Set_Time[4]     = timeT.minute;
-    Set_Time[5]     = timeT.second;
-    Set_Time_Select = 0;
-    Set_Time_Select_History = 1;
-    
+    Set_Time_Select=0U;
+    Set_Time_Select_History=0xFFU;
 }
 
 void Time_Set_Page_Reflash(void)
 {
-    char buffer[8]; /* [B1] Time fields have room for unexpected values. */
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[0]);
-    OLED_PrintString(20,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[1]);
-    OLED_PrintString(60,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[2]);
-    OLED_PrintString(100,2,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[3]);
-    OLED_PrintString(20,5,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[4]);
-    OLED_PrintString(60,5,buffer,FONT_8X16);
-    snprintf(buffer,sizeof(buffer),"%02d",Set_Time[5]);
-    OLED_PrintString(100,5,buffer,FONT_8X16);
-    if(Set_Time_Select_History!=Set_Time_Select)
+    static const uint8_t xpos[6]={20,60,100,20,60,100};
+    static const uint8_t ypos[6]={2,2,2,5,5,5};
+    uint8_t i;
+    char text[4];
+    const char *status="20YY             ";
+    PCF8563_NormalizeEdit(Set_Time);
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    for (i=0U;i<6U;++i)
     {
-        switch(Set_Time_Select)
-        {
-            case 0:
-                OLED_PrintLine(100,116,7,0x00);
-                OLED_PrintLine(20,36,4,0x01);
-                break;
-            case 1:
-                OLED_PrintLine(20,36,4,0x00);
-                OLED_PrintLine(60,76,4,0x01);
-                break;
-            case 2:
-                OLED_PrintLine(60,76,4,0x00);
-                OLED_PrintLine(100,116,4,0x01);
-                break;
-            case 3:
-                OLED_PrintLine(100,116,4,0x00);
-                OLED_PrintLine(20,36,7,0x01);
-                break;
-            case 4:
-                OLED_PrintLine(20,36,7,0x00);
-                OLED_PrintLine(60,76,7,0x01);
-                break;
-            case 5:
-                OLED_PrintLine(60,76,7,0x00);
-                OLED_PrintLine(100,116,7,0x01);
-                break;
-        }
-        Set_Time_Select_History = Set_Time_Select;
+        /* Two digits plus one space removes any old third digit (e.g. 999).
+         * Day/seconds end at x=123, within the 128 px display. */
+        snprintf(text,sizeof(text),"%02u ",(unsigned)(Set_Time[i]%100U));
+        OLED_PrintString(xpos[i],ypos[i],text,FONT_8X16);
     }
+    if (Set_Time_Select_History!=Set_Time_Select)
+    {
+        for (i=0U;i<6U;++i)
+            OLED_PrintLine(xpos[i],xpos[i]+16U,ypos[i]+2U,i==Set_Time_Select ? 0x01 : 0x00);
+        Set_Time_Select_History=Set_Time_Select;
+    }
+    if (Set_Time_Error==1U) status="RTC READ ERROR   ";
+    else if (Set_Time_Error==2U) status="INVALID DATE     ";
+    else if (Set_Time_Error==3U) status="RTC WRITE ERROR  ";
+    OLED_PrintString(5,0,(char *)status,FONT_6X8);
 }
 
 /*************************目标设置界面***************************/
@@ -511,20 +543,11 @@ void Percision_Menu_Page_Reflash(void)
 //static uint32_t CG_Calibration_Tim_Current = 0;
 //static uint32_t CG_Calibration_Tim_History = 0;
 
-static char *Calibration_Error_Label(uint8_t error)
-{
-    if (error == CAL_SAVE_NO_SENSOR) return "NO SENSOR";
-    if (error == CAL_SAVE_TEMP_ERROR) return "TEMP ERR";
-    if (error == CAL_SAVE_SENSOR_ERROR) return "SENSOR ERR";
-    if (error == CAL_SAVE_BAD_POINTS) return "CAL ERROR";
-    return "SAVE FAIL";
-}
-
 void CG_Calibration_Page_Init(void)
 {
     CG_Calibration_Status = 0;
-    CG_Calibration_Status_History = 0xFFU;
-    CG_Cal_Save_Failed = CAL_SAVE_OK;
+    Sensor_CG_Stability_Reset();
+    CG_Cal_Save_Failed = 0U; /* [CGFIX-03] */
 //    CG_Calibration_Tim_Current = 0;
 //    CG_Calibration_Tim_History = 0;
 }
@@ -533,6 +556,8 @@ void CG_Calibration_Page_Init(void)
 char CG_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
 void CG_Calibration_Page_Reflash(void)
 {
+    char live_ad_text[16];
+    uint8_t sensor_fresh = Sensor_Data_Is_Fresh();
     if(CG_Calibration_Status_History!=CG_Calibration_Status)
     {
         OLED_Clear();
@@ -542,7 +567,7 @@ void CG_Calibration_Page_Reflash(void)
     switch(CG_Calibration_Status)
     {
         case 0:
-            OLED_PrintChinese(40,1,"水平处");
+            OLED_PrintChinese(40,0,"水平处");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -551,12 +576,12 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 1:
-            OLED_PrintChinese(40,1,"水平处");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Left_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintChinese(40,0,"水平处");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Zero_Left_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 2:
-            OLED_PrintChinese(24,1,"水平处掉头");
+            OLED_PrintChinese(24,0,"水平处掉头");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -565,12 +590,12 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 3:
-            OLED_PrintChinese(24,1,"水平处掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Zero_Right_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintChinese(24,0,"水平处掉头");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Zero_Right_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 4:
-            OLED_PrintString(44,1,"180mm",FONT_8X16);
+            OLED_PrintString(44,0,"180mm",FONT_8X16);
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -579,13 +604,13 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 5:
-            OLED_PrintString(44,1,"180mm",FONT_8X16);
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Left_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintString(44,0,"180mm",FONT_8X16);
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Max_Left_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 6:
-            OLED_PrintString(28,1,"180mm",FONT_8X16);
-            OLED_PrintChinese(68,1,"掉头");
+            OLED_PrintString(28,0,"180mm",FONT_8X16);
+            OLED_PrintChinese(68,0,"掉头");
             OLED_PrintChinese(24,4,"存储键保存");
 //            CG_Calibration_Tim_Current = HAL_GetTick();
 //            if((CG_Calibration_Tim_Current - CG_Calibration_Tim_History)>1000)
@@ -594,41 +619,72 @@ void CG_Calibration_Page_Reflash(void)
 //            }
             break;
         case 7:
-            OLED_PrintString(28,1,"180mm",FONT_8X16);
-            OLED_PrintChinese(68,1,"掉头");
-            snprintf(CG_buffer,sizeof(CG_buffer),"%05d",CG_Param_Temp.CG_Max_Right_Ad);
-            OLED_PrintString(44,4,CG_buffer,FONT_8X16);
+            OLED_PrintString(28,0,"180mm",FONT_8X16);
+            OLED_PrintChinese(68,0,"掉头");
+            snprintf(CG_buffer,sizeof(CG_buffer),"%+06d",CG_Param_Temp.CG_Max_Right_Ad);
+            OLED_PrintString(60,4,CG_buffer,FONT_8X16);
             break;
         case 8:
             /* [CGFIX-03] Collected four AD points, NOT saved yet. */
-            OLED_PrintChinese(32,1,"超高标定");
-            if (CG_Cal_Save_Failed == CAL_SAVE_FAILED)
+            OLED_PrintChinese(32,0,"超高标定");
+            if(CG_Cal_Save_Failed == 3U)
+                OLED_PrintString(28,4,"NO SENSOR",FONT_8X16);
+            else if(CG_Cal_Save_Failed == 2U)
+                OLED_PrintString(28,4,"CAL ERROR",FONT_8X16);
+            else if(CG_Cal_Save_Failed)
                 OLED_PrintString(28,4,"EEP ERROR",FONT_8X16);
-            else if (CG_Cal_Save_Failed != CAL_SAVE_OK)
-                OLED_PrintString(28,4,Calibration_Error_Label(CG_Cal_Save_Failed),FONT_8X16);
             else
                 OLED_PrintChinese(24,4,"存储键保存");
             break;
         case 9:
             /* Only reached after EEPROM CRC/readback commit succeeds. */
-            OLED_PrintChinese(32,1,"超高标定");
+            OLED_PrintChinese(32,0,"超高标定");
             OLED_PrintChinese(48,4,"成功");
             break;
         case 10:
             set_PageId(page_calibration_menu);
             break;
     }
-    /* [CG32-05] Error also visible on the four capture prompt pages. */
-    if (CG_Cal_Save_Failed != CAL_SAVE_OK && CG_Calibration_Status < 8U)
-        OLED_PrintString(24,6,Calibration_Error_Label(CG_Cal_Save_Failed),FONT_8X16);
+    /* [CG37] Live received AD stays visible before and after capture.
+     * Six signed digits fully overwrite previous values, including -32768. */
+    if (CG_Calibration_Status < 10U)
+    {
+        if (sensor_fresh)
+            snprintf(live_ad_text,sizeof(live_ad_text),"AD:%+06d",CG_Ad);
+        else
+            snprintf(live_ad_text,sizeof(live_ad_text),"AD:------");
+        OLED_PrintString(28,2,live_ad_text,FONT_8X16);
+    }
+    if (CG_Calibration_Status < 8U)
+    {
+        int16_t stable_ad;
+        char *status = "SAVED    ";
+        if ((CG_Calibration_Status & 1U) != 0U)
+            OLED_PrintString(20,4,"SAVE:",FONT_8X16);
+        if (!sensor_fresh) status = "NO SENSOR";
+        else if ((CG_Calibration_Status & 1U) == 0U)
+        {
+            if (Sensor_Get_Stable_CG(&stable_ad)) status = "READY    ";
+            else
+            {
+                switch (CG_Calibration_Wait_State)
+                {
+                    case CG_CAL_WAIT_LINK:  status = "WAIT LINK"; break;
+                    case CG_CAL_WAIT_TIME:  status = "WAIT TIME"; break;
+                    case CG_CAL_WAIT_NOISE: status = "WAIT AD  "; break;
+                    case CG_CAL_WAIT_DRIFT: status = "WAIT DRFT"; break;
+                    default:               status = "WAIT DATA"; break;
+                }
+            }
+        }
+        OLED_PrintString(28,6,status,FONT_8X16);
+    }
 }
 
 /*************************轨距标定设置界面***************************/
 void GJ_Calibration_Page_Init(void)
 {
     GJ_Calibration_Status = 0;
-    GJ_Calibration_Status_History = 0xFFU;
-    GJ_Cal_Save_Failed = CAL_SAVE_OK;
 }
 
 char GJ_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
@@ -647,7 +703,7 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 1:
             OLED_PrintString(36,1,"1410mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1410_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 2:
@@ -656,7 +712,7 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 3:
             OLED_PrintString(36,1,"1435mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1435_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 4:
@@ -665,83 +721,95 @@ void CJ_Calibration_Page_Reflash(void)
             break;
         case 5:
             OLED_PrintString(36,1,"1470mm",FONT_8X16);
-            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05u",(unsigned)GJ_Param_Temp.GJ_1470_Ad);
+            snprintf(GJ_buffer,sizeof(GJ_buffer),"%05d",GJ_Ad);
             OLED_PrintString(44,4,GJ_buffer,FONT_8X16);
             break;
         case 6:
             OLED_PrintChinese(32,1,"轨距标定");
-            if (GJ_Cal_Save_Failed != CAL_SAVE_OK)
-                OLED_PrintString(24,4,Calibration_Error_Label(GJ_Cal_Save_Failed),FONT_8X16);
-            else
-                OLED_PrintChinese(24,4,"存储键保存");
+            OLED_PrintChinese(48,4,"成功");
             break;
         case 7:
-            OLED_PrintChinese(32,1,"轨距标定");
-            OLED_PrintChinese(48,4,"成功"); /* EEPROM commit has succeeded. */
-            break;
-        case 8:
             set_PageId(page_calibration_menu);
             break;
     }
-    if (GJ_Cal_Save_Failed != CAL_SAVE_OK && GJ_Calibration_Status < 6U)
-        OLED_PrintString(24,6,Calibration_Error_Label(GJ_Cal_Save_Failed),FONT_8X16);
 }
 
 /*************************查护标定设置界面***************************/
 void CH_Calibration_Page_Init(void)
 {
-    CH_Calibration_Status = 0;
-    CH_Calibration_Status_History = 0xFFU;
-    CH_Cal_Save_Failed = CAL_SAVE_OK;
+    CH_Calibration_Status=0U;
+    CH_Calibration_Status_History=0xFFU;
+    CH_Cal_Save_Failed=0U;
+    CH_Param_Temp=CH_Param;
+    Sensor_GJ_Stability_Reset();
 }
 
 char CH_buffer[8] = {0}; /* [B1] Signed 16-bit: -32768 + NUL needs 7 bytes. */
 void CH_Calibration_Page_Reflash(void)
 {
-    if(CH_Calibration_Status_History!=CH_Calibration_Status)
+    char text[17];
+    const char *status="CAPTURED    ";
+    uint8_t fresh=Sensor_Data_Is_Fresh();
+    if (CH_Calibration_Status_History!=CH_Calibration_Status)
     {
         OLED_Clear();
-        CH_Calibration_Status_History = CH_Calibration_Status;
+        CH_Calibration_Status_History=CH_Calibration_Status;
     }
-    switch(CH_Calibration_Status)
+    if (CH_Calibration_Status>=6U)
     {
-        case 0:
-            OLED_PrintChinese(24,1,"查照标定值");
-            OLED_PrintString(36,3,"1391mm",FONT_8X16);
-            break;
-        case 1:
-            OLED_PrintChinese(32,1,"查");
-            OLED_PrintString(48,1,"1391mm",FONT_8X16);
-            snprintf(CH_buffer,sizeof(CH_buffer),"%05u",(unsigned)CH_Param_Temp.CZ_Ad);
-            OLED_PrintString(44,4,CH_buffer,FONT_8X16);
-            break;
-        case 2:
-            OLED_PrintChinese(24,1,"护背标定值");
-            OLED_PrintString(36,3,"1348mm",FONT_8X16);
-            break;
-        case 3:
-            OLED_PrintChinese(32,1,"护");
-            OLED_PrintString(48,1,"1348mm",FONT_8X16);
-            snprintf(CH_buffer,sizeof(CH_buffer),"%05u",(unsigned)CH_Param_Temp.HB_Ad);
-            OLED_PrintString(44,4,CH_buffer,FONT_8X16);
-            break;
-        case 4:
-            OLED_PrintChinese(32,1,"查护标定");
-            if (CH_Cal_Save_Failed != CAL_SAVE_OK)
-                OLED_PrintString(24,4,Calibration_Error_Label(CH_Cal_Save_Failed),FONT_8X16);
-            else
-                OLED_PrintChinese(24,4,"存储键保存");
-            break;
-        case 5:
-            OLED_PrintChinese(32,1,"查护标定");
-            OLED_PrintChinese(48,4,"成功"); /* EEPROM commit has succeeded. */
-            break;
-        case 6:
-            set_PageId(page_calibration_menu);
-            break;
+        set_PageId(page_calibration_menu);
+        return;
     }
-    if (CH_Cal_Save_Failed != CAL_SAVE_OK && CH_Calibration_Status < 4U)
-        OLED_PrintString(24,6,Calibration_Error_Label(CH_Cal_Save_Failed),FONT_8X16);
+    if (CH_Calibration_Status<2U) OLED_PrintString(20,0,"CZ 1391mm",FONT_8X16);
+    else if (CH_Calibration_Status<4U) OLED_PrintString(20,0,"HB 1348mm",FONT_8X16);
+    else OLED_PrintChinese(32,0,"查护标定");
+    if (fresh) snprintf(text,sizeof(text),"AD:%05u",(unsigned)GJ_Ad);
+    else snprintf(text,sizeof(text),"AD:-----");
+    OLED_PrintString(28,2,text,FONT_8X16);
+    if (CH_Calibration_Status==1U || CH_Calibration_Status==3U)
+    {
+        snprintf(text,sizeof(text),"CAP:%05u",(unsigned)(CH_Calibration_Status==1U ?
+                 CH_Param_Temp.CZ_Ad : CH_Param_Temp.HB_Ad));
+        OLED_PrintString(28,4,text,FONT_8X16);
+    }
+    else if (CH_Calibration_Status==5U)
+    {
+        OLED_PrintChinese(48,4,"成功");
+        status="SAVED       ";
+    }
+    else
+    {
+        OLED_PrintChinese(24,4,"存储键保存");
+        if (CH_Calibration_Status==4U)
+        {
+            status="SAVE?       ";
+            if (CH_Cal_Save_Failed==1U) status="EEP ERROR   ";
+            else if (CH_Cal_Save_Failed==2U) status="CAL ERROR   ";
+            else if (CH_Cal_Save_Failed==3U) status="NO SENSOR   ";
+        }
+        else
+        {
+            float scale;
+            uint16_t stable_ad;
+            if (!GJ_Get_Valid_Scale(&scale)) status="GJ CAL ERROR";
+            else if (!(Temp>=-40.0f && Temp<=100.0f)) status="TEMP ERROR  ";
+            else if (Sensor_Get_Stable_GJ(&stable_ad,scale)) status="READY       ";
+            else
+            {
+                switch (CH_Calibration_Wait_State)
+                {
+                    case CH_CAL_WAIT_LINK: status="WAIT LINK   "; break;
+                    case CH_CAL_WAIT_TIME: status="WAIT TIME   "; break;
+                    case CH_CAL_WAIT_NOISE: status="WAIT NOISE  "; break;
+                    case CH_CAL_WAIT_DRIFT: status="WAIT DRIFT  "; break;
+                    case CH_CAL_WAIT_SCALE: status="GJ CAL ERROR"; break;
+                    default: status="WAIT DATA   "; break;
+                }
+            }
+        }
+    }
+    if (!fresh && CH_Calibration_Status!=5U) status="NO SENSOR   ";
+    OLED_PrintString(16,6,(char *)status,FONT_8X16);
 }
 
 
@@ -771,18 +839,12 @@ void oled_Reflash(void)
 {
     PAGE_ID            page_id = get_PageId();
     static PAGE_FUN_T  page_fun;
-    if (OLED_HasFault())
-    {
-        if (!OLED_TryRecover()) return;
-        Page_Id_History = page_size; /* redraw all fields after re-init */
-    }
     
     if(page_id != Page_Id_History)
     {
         //更新页面
         page_fun = Page_Fun_Buffere[page_id];
         Page_Id_History = page_id;
-        RTC_HeaderRedraw = 1U;
         //清除屏幕
         OLED_Clear();
         //刷新初始界面

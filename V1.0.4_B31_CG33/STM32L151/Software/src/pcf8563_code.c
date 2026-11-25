@@ -1,5 +1,58 @@
 #include "pcf8563_head.h"
 
+/* [CG39] Calendar bounds are shared by editor and RTC access checks. */
+uint8_t PCF8563_DaysInMonth(uint8_t year,uint8_t month,uint8_t century)
+{
+    static const uint8_t days[12]={31,28,31,30,31,30,31,31,30,31,30,31};
+    uint16_t full_year=(uint16_t)(2000U+100U*century+year);
+    if (month<1U || month>12U || year>99U || century>1U) return 0U;
+    if (month==2U && full_year%4U==0U &&
+        (full_year%100U!=0U || full_year%400U==0U)) return 29U;
+    return days[month-1U];
+}
+
+uint8_t PCF8563_TimeIsValid(const PCF8563_TimeTypeDef *time)
+{
+    uint8_t days;
+    if (time==0) return 0U;
+    days=PCF8563_DaysInMonth(time->year,time->month,time->century);
+    return (days!=0U && time->day>=1U && time->day<=days &&
+            time->hour<=23U && time->minute<=59U && time->second<=59U &&
+            time->weekday<=6U) ? 1U : 0U;
+}
+
+uint8_t PCF8563_Weekday(uint8_t year,uint8_t month,uint8_t day)
+{
+    uint32_t days=0U;
+    uint8_t y,m;
+    if (year>99U || month<1U || month>12U || day<1U ||
+        day>PCF8563_DaysInMonth(year,month,0U)) return 0U;
+    for (y=0U;y<year;++y) days+=(y%4U==0U) ? 366U : 365U;
+    for (m=1U;m<month;++m) days+=PCF8563_DaysInMonth(year,m,0U);
+    return (uint8_t)((6U+days+day-1U)%7U); /* 2000-01-01 was Saturday. */
+}
+
+void PCF8563_NormalizeEdit(uint8_t fields[6])
+{
+    uint8_t days;
+    if (fields==0) return;
+    if (fields[0]>99U) fields[0]=0U;
+    if (fields[1]<1U || fields[1]>12U) fields[1]=1U;
+    days=PCF8563_DaysInMonth(fields[0],fields[1],0U);
+    if (fields[2]<1U) fields[2]=1U;
+    if (fields[2]>days) fields[2]=days;
+    if (fields[3]>23U) fields[3]=0U;
+    if (fields[4]>59U) fields[4]=0U;
+    if (fields[5]>59U) fields[5]=0U;
+}
+
+static uint8_t PCF8563_BCDIsValid(uint8_t bcd)
+{
+    return ((bcd&0x0FU)<=9U && (bcd>>4)<=9U) ? 1U : 0U;
+}
+
+
+
 
 /**
   * @brief  十进制转BCD码
@@ -63,6 +116,8 @@ uint8_t PCF8563_SetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time)
     uint8_t data[8];
     HAL_StatusTypeDef status;
     
+    if (hi2c==0 || !PCF8563_TimeIsValid(time)) return HAL_ERROR;
+
     /* 准备时间数据 */
     data[0] = PCF8563_REG_SC;  // 起始寄存器地址
     
@@ -105,37 +160,30 @@ uint8_t PCF8563_SetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time)
   */
 uint8_t PCF8563_GetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time)
 {
-    uint8_t data[7];
+    uint8_t data[7],i;
+    static const uint8_t masks[7]={0x7F,0x7F,0x3F,0x3F,0x07,0x1F,0xFF};
+    uint8_t reg_addr=PCF8563_REG_SC;
     HAL_StatusTypeDef status;
-    uint8_t reg_addr = PCF8563_REG_SC;
-    
-    /* 设置读取起始地址 */
-    status = HAL_I2C_Master_Transmit(hi2c, PCF8563_ADDR_WRITE, &reg_addr, 1, 100);
-    if (status != HAL_OK)
-    {
-        return status;
-    }
-    
-    /* 读取时间数据 */
-    status = HAL_I2C_Master_Receive(hi2c, PCF8563_ADDR_READ, data, 7, 100);
-    if (status != HAL_OK)
-    {
-        return status;
-    }
-    
-    /* 解析时间数据 */
-    time->second = BCD_to_DEC(data[0] & 0x7F);  // 忽略VL位
-    time->minute = BCD_to_DEC(data[1] & 0x7F);
-    time->hour = BCD_to_DEC(data[2] & 0x3F);
-    time->day = BCD_to_DEC(data[3] & 0x3F);
-    time->weekday = data[4] & 0x07;
-    
-    /* 月和世纪标志 */
-    time->century = (data[5] & PCF8563_MO_C) ? 1 : 0;
-    time->month = BCD_to_DEC(data[5] & 0x1F);
-    
-    time->year = BCD_to_DEC(data[6]);
-    
+    PCF8563_TimeTypeDef decoded;
+    if (hi2c==0 || time==0) return HAL_ERROR;
+    status=HAL_I2C_Master_Transmit(hi2c,PCF8563_ADDR_WRITE,&reg_addr,1,100);
+    if (status!=HAL_OK) return status;
+    /* NXP: seconds through years must be read in one access. */
+    status=HAL_I2C_Master_Receive(hi2c,PCF8563_ADDR_READ,data,7,100);
+    if (status!=HAL_OK) return status;
+    if ((data[0]&PCF8563_SC_VL)!=0U) return HAL_ERROR;
+    for (i=0U;i<7U;++i)
+        if (i!=4U && !PCF8563_BCDIsValid(data[i]&masks[i])) return HAL_ERROR;
+    decoded.second=BCD_to_DEC(data[0]&0x7F);
+    decoded.minute=BCD_to_DEC(data[1]&0x7F);
+    decoded.hour=BCD_to_DEC(data[2]&0x3F);
+    decoded.day=BCD_to_DEC(data[3]&0x3F);
+    decoded.weekday=data[4]&0x07;
+    decoded.month=BCD_to_DEC(data[5]&0x1F);
+    decoded.century=(data[5]&PCF8563_MO_C)!=0U ? 1U : 0U;
+    decoded.year=BCD_to_DEC(data[6]);
+    if (!PCF8563_TimeIsValid(&decoded)) return HAL_ERROR;
+    *time=decoded; /* Caller data is untouched on any error. */
     return HAL_OK;
 }
 

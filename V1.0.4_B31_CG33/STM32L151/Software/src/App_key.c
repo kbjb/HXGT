@@ -74,8 +74,15 @@ void GoTo_Ch_Page(void)
 
 void Reduce_Time_For_Time_Select(void)
 {
-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == 0?Time_Set_Threshold[Set_Time_Select]:Set_Time[Set_Time_Select]-1;
+    static const uint8_t maxima[6]={99,12,31,23,59,59};
+    uint8_t minimum,maximum;
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    PCF8563_NormalizeEdit(Set_Time);
+    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
+    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
+    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]<=minimum) ? maximum : Set_Time[Set_Time_Select]-1U;
+    PCF8563_NormalizeEdit(Set_Time);
+    Set_Time_Error=0U;
 }
 
 void Reduce_Goal_For_Goal_Select(void)
@@ -122,8 +129,15 @@ void Reduce_Calibration_For_Menu_Select(void)
 
 void InCrease_Time_For_Time_Select(void)
 {
-    uint8_t Time_Set_Threshold[6] = {99,12,31,23,59,59};
-    Set_Time[Set_Time_Select] = Set_Time[Set_Time_Select] == Time_Set_Threshold[Set_Time_Select]?0:Set_Time[Set_Time_Select]+1;
+    static const uint8_t maxima[6]={99,12,31,23,59,59};
+    uint8_t minimum,maximum;
+    if (Set_Time_Select>=6U) Set_Time_Select=0U;
+    PCF8563_NormalizeEdit(Set_Time);
+    minimum=(Set_Time_Select==1U || Set_Time_Select==2U) ? 1U : 0U;
+    maximum=Set_Time_Select==2U ? PCF8563_DaysInMonth(Set_Time[0],Set_Time[1],0U) : maxima[Set_Time_Select];
+    Set_Time[Set_Time_Select]=(Set_Time[Set_Time_Select]>=maximum) ? minimum : Set_Time[Set_Time_Select]+1U;
+    PCF8563_NormalizeEdit(Set_Time);
+    Set_Time_Error=0U;
 }
 void InCrease_Goal_For_Goal_Select(void)
 {
@@ -181,7 +195,7 @@ void Change_Menu_Menu_Id(void)
 
 void Change_Time_Select_Id(void)
 {
-    Set_Time_Select = Set_Time_Select == 5?0:Set_Time_Select+1;
+    Set_Time_Select=(Set_Time_Select>=5U) ? 0U : Set_Time_Select+1U;
 }
 
 void Change_Goal_Set_Select_Id(void)
@@ -282,173 +296,196 @@ void Password_Set_Confirm(void)
 }
 
 extern I2C_HandleTypeDef hi2c2;
-/* The UI's two-digit year is 2000..2099 (century flag 0).
- * Count from 2000-01-01, a Saturday, to generate the RTC weekday. */
-static uint8_t Prepare_RTC_Time(PCF8563_TimeTypeDef *t)
-{
-    static const uint8_t days_in_month[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    uint32_t days;
-    uint8_t m, limit, leap;
-    if (t->year > 99U || t->month < 1U || t->month > 12U ||
-        t->hour > 23U || t->minute > 59U || t->second > 59U) return 0U;
-    leap = (t->year % 4U == 0U);
-    limit = (uint8_t)(days_in_month[t->month - 1U] + (t->month == 2U && leap));
-    if (t->day < 1U || t->day > limit) return 0U;
-    days = 365UL * t->year + ((t->year + 3U) / 4U);
-    for (m = 1U; m < t->month; ++m)
-        days += days_in_month[m - 1U] + (m == 2U && leap);
-    t->weekday = (uint8_t)((days + t->day - 1U + 6U) % 7U);
-    t->century = 0U;
-    return 1U;
-}
-
 void Change_Time_For_Set_Time(void)
 {
-    PCF8563_TimeTypeDef time;
-    time.year = Set_Time[0];
-    time.month = Set_Time[1];
-    time.day = Set_Time[2];
-    time.hour = Set_Time[3];
-    time.minute = Set_Time[4];
-    time.second = Set_Time[5];
-    if(Prepare_RTC_Time(&time) && PCF8563_SetTime(&hi2c2,&time) == HAL_OK)
+    PCF8563_TimeTypeDef time={0};
+    time.year=Set_Time[0]; time.month=Set_Time[1]; time.day=Set_Time[2];
+    time.hour=Set_Time[3]; time.minute=Set_Time[4]; time.second=Set_Time[5];
+    time.century=0U; /* Six-field editor uses 2000..2099. */
+    time.weekday=PCF8563_Weekday(time.year,time.month,time.day);
+    if (!PCF8563_TimeIsValid(&time))
     {
+        Set_Time_Error=2U;
+        Beep_Ctrl(100,3);
+        return;
+    }
+    if (PCF8563_SetTime(&hi2c2,&time)==HAL_OK)
+    {
+        Set_Time_Error=0U;
         Beep_Ctrl(100,1);
         set_PageId(page_menu);
     }
     else
+    {
+        Set_Time_Error=3U;
         Beep_Ctrl(100,3);
+    }
 }
 
 /*存储键相关功能*/
 
 
-static uint8_t Calibration_Input_Error(uint8_t check_gauge, uint8_t check_temp)
-{
-    if (!Sensor_Data_Is_Fresh()) return CAL_SAVE_NO_SENSOR;
-    /* Sensor board sends unsigned 15-bit gauge ADC data or 0xffff on fault. */
-    if (check_gauge && GJ_Ad > 0x7FFFU) return CAL_SAVE_SENSOR_ERROR;
-    if (check_temp && !(Temp >= -40.0f && Temp <= 100.0f))
-        return CAL_SAVE_TEMP_ERROR; /* Includes a missing (NaN) conversion. */
-    return CAL_SAVE_OK;
-}
-
-static void Calibration_Fail(uint8_t *state, uint8_t *history, uint8_t error)
-{
-    if (*state != error) *history = 0xFFU; /* invalidate previous message */
-    *state = error;
-    Beep_Ctrl(100,3);
-}
-
 void CG_Calibration_Storage(void)
 {
-    uint8_t step = CG_Calibration_Status;
-    if (step >= 10U) return;
-    /* The temperature reference applies to the whole four-point calibration.
-     * Reject untrusted temperature at each data capture as well as commit. */
-    if ((step & 1U) == 0U)
+    int16_t captured_ad = 0;
+    /* [CG32-05] Require fresh sensor data before capture or commit. */
+    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
+         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U ||
+         CG_Calibration_Status == 8U) && !Sensor_Data_Is_Fresh())
     {
-        uint8_t error = Calibration_Input_Error(0U,1U);
-        if (error != CAL_SAVE_OK)
-        {
-            Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History, error);
-            return;
-        }
+        CG_Cal_Save_Failed = 3U;
+        CG_Calibration_Status_History = 0xFFU;
+        Beep_Ctrl(100,3);
+        return;
     }
-    switch (step)
+    if ((CG_Calibration_Status == 0U || CG_Calibration_Status == 2U ||
+         CG_Calibration_Status == 4U || CG_Calibration_Status == 6U) &&
+        !Sensor_Get_Stable_CG(&captured_ad))
     {
-        case 0: CG_Param_Temp.CG_Zero_Left_Ad  = CG_Ad; break;
-        case 2: CG_Param_Temp.CG_Zero_Right_Ad = CG_Ad; break;
-        case 4: CG_Param_Temp.CG_Max_Left_Ad   = CG_Ad; break;
-        case 6: CG_Param_Temp.CG_Max_Right_Ad  = CG_Ad; break;
-        case 8:
+        CG_Cal_Save_Failed = 4U; /* Still moving or not enough fresh samples. */
+        CG_Calibration_Status_History = 0xFFU;
+        Beep_Ctrl(100,3);
+        return;
+    }
+    if (CG_Cal_Save_Failed == 3U || CG_Cal_Save_Failed == 4U)
+    {
+        CG_Cal_Save_Failed = 0U;
+        CG_Calibration_Status_History = 0xFFU;
+    }
+    CG_Calibration_Status++;
+    switch(CG_Calibration_Status)
+    {
+        case 1:
+            CG_Param_Temp.CG_Zero_Left_Ad  = captured_ad;
+            break;
+        case 3:
+            CG_Param_Temp.CG_Zero_Right_Ad = captured_ad;
+            break;
+        case 5:
+            CG_Param_Temp.CG_Max_Left_Ad   = captured_ad;
+            break;
+        case 7:
+            CG_Param_Temp.CG_Max_Right_Ad  = captured_ad;
+            break;
+        case 9:
+            /* [B3] All five CG fields are written together to a new
+             * validated A/B snapshot, never to legacy overlapping bytes. */
             CG_Param_Temp.temp = Temp;
             if (!CG_Calibration_Sane(&CG_Param_Temp))
             {
-                Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History,
-                                 CAL_SAVE_BAD_POINTS);
+                CG_Calibration_Status = 8U;
+                CG_Cal_Save_Failed = 2U; /* Invalid 180mm AD span/zero gap */
+                CG_Calibration_Status_History = 0xFFU;
+                Beep_Ctrl(100,3);
                 return;
             }
-            if (!Eep_Save_CG_Calibration(CG_Param_Temp))
+            if (Eep_Save_CG_Calibration(CG_Param_Temp) == 0)
             {
-                Calibration_Fail(&CG_Cal_Save_Failed, &CG_Calibration_Status_History,
-                                 CAL_SAVE_FAILED);
+                CG_Calibration_Status = 8; /* Retrying the storage key is safe. */
+                CG_Cal_Save_Failed = 1U; /* [CGFIX-03] Do not claim success. */
+                CG_Calibration_Status_History = 0xFFU; /* force OLED_Clear() */
+                Beep_Ctrl(100,3);
                 return;
             }
-            CG_Data_Init(); /* Only after verified snapshot commit. */
+            /* [CGFIX-01] Eep_Save_CG_Calibration updates CG_Param only
+             * after verified commit. Recompute K/B for immediate use. */
+            CG_Data_Init();
+            CG_Cal_Save_Failed = 0U;
             Beep_Ctrl(100,1);
             break;
     }
-    CG_Cal_Save_Failed = CAL_SAVE_OK;
-    CG_Calibration_Status = (uint8_t)(step + 1U);
+    if (CG_Calibration_Status < 8U) Sensor_CG_Stability_Reset();
 }
+
+
+
 
 void GJ_Calibration_Storage(void)
 {
-    uint8_t step = GJ_Calibration_Status;
-    if (step >= 8U) return;
-    if ((step & 1U) == 0U)
+    GJ_Calibration_Status++;
+    switch(GJ_Calibration_Status)
     {
-        /* Gauge's raw points do not use temperature. The stored reference
-         * temperature must be valid, as must the live link, at commit. */
-        uint8_t error = Calibration_Input_Error(1U, step == 6U);
-        if (error != CAL_SAVE_OK)
-        {
-            Calibration_Fail(&GJ_Cal_Save_Failed, &GJ_Calibration_Status_History, error);
-            return;
-        }
-    }
-    switch (step)
-    {
-        case 0: GJ_Param_Temp.GJ_1410_Ad = GJ_Ad; break;
-        case 2: GJ_Param_Temp.GJ_1435_Ad = GJ_Ad; break;
-        case 4: GJ_Param_Temp.GJ_1470_Ad = GJ_Ad; break;
-        case 6:
+        case 1:
+            GJ_Param_Temp.GJ_1410_Ad   = GJ_Ad;
+            break;
+        case 3:
+            GJ_Param_Temp.GJ_1435_Ad   = GJ_Ad;
+            break;
+        case 5:
+            GJ_Param_Temp.GJ_1470_Ad   = GJ_Ad;
+            break;
+        case 7:
+            /* [B3] One validated atomic-ish A/B update for GJ points. */
             GJ_Param_Temp.temp = Temp;
-            if (!Eep_Save_GJ_Calibration(GJ_Param_Temp))
+            if (Eep_Save_GJ_Calibration(GJ_Param_Temp) == 0)
             {
-                Calibration_Fail(&GJ_Cal_Save_Failed, &GJ_Calibration_Status_History,
-                                 CAL_SAVE_FAILED);
+                GJ_Calibration_Status = 6;
+                Beep_Ctrl(100,3);
                 return;
             }
             Beep_Ctrl(100,1);
             break;
     }
-    GJ_Cal_Save_Failed = CAL_SAVE_OK;
-    GJ_Calibration_Status = (uint8_t)(step + 1U);
 }
 
 void CH_Calibration_Storage(void)
 {
-    uint8_t step = CH_Calibration_Status;
-    if (step >= 6U) return;
-    if ((step & 1U) == 0U)
+    uint16_t captured_ad=0U;
+    float scale;
+    if (CH_Calibration_Status==0U || CH_Calibration_Status==2U ||
+        CH_Calibration_Status==4U)
     {
-        uint8_t error = Calibration_Input_Error(1U, step == 4U);
-        if (error != CAL_SAVE_OK)
+        if (!Sensor_Data_Is_Fresh()) CH_Cal_Save_Failed=3U;
+        else if (!GJ_Get_Valid_Scale(&scale) ||
+                 !(Temp>=-40.0f && Temp<=100.0f)) CH_Cal_Save_Failed=2U;
+        else if (CH_Calibration_Status!=4U &&
+                 !Sensor_Get_Stable_GJ(&captured_ad,scale)) CH_Cal_Save_Failed=4U;
+        else CH_Cal_Save_Failed=0U;
+        if (CH_Cal_Save_Failed!=0U)
         {
-            Calibration_Fail(&CH_Cal_Save_Failed, &CH_Calibration_Status_History, error);
+            CH_Calibration_Status_History=0xFFU;
+            Beep_Ctrl(100,3);
             return;
         }
     }
-    switch (step)
+    switch (CH_Calibration_Status)
     {
-        case 0: CH_Param_Temp.CZ_Ad = GJ_Ad; break;
-        case 2: CH_Param_Temp.HB_Ad = GJ_Ad; break;
-        case 4:
-            CH_Param_Temp.temp = Temp;
-            if (!Eep_Save_CH_Calibration(CH_Param_Temp))
+        case 0U:
+            CH_Param_Temp.CZ_Ad=captured_ad;
+            CH_Calibration_Status=1U;
+            break;
+        case 1U:
+            CH_Calibration_Status=2U;
+            Sensor_GJ_Stability_Reset();
+            break;
+        case 2U:
+            CH_Param_Temp.HB_Ad=captured_ad;
+            CH_Calibration_Status=3U;
+            break;
+        case 3U:
+            CH_Calibration_Status=4U; /* collected, not committed */
+            break;
+        case 4U:
+            CH_Param_Temp.temp=Temp;
+            if (Eep_Save_CH_Calibration(CH_Param_Temp)==0U)
             {
-                Calibration_Fail(&CH_Cal_Save_Failed, &CH_Calibration_Status_History,
-                                 CAL_SAVE_FAILED);
+                CH_Cal_Save_Failed=1U;
+                CH_Calibration_Status_History=0xFFU;
+                Beep_Ctrl(100,3);
                 return;
             }
-            Beep_Ctrl(100,1);
+            CH_Cal_Save_Failed=0U;
+            CH_Calibration_Status=5U; /* only verified commit is success */
             break;
+        case 5U:
+            CH_Calibration_Status=6U;
+            break;
+        default:
+            return;
     }
-    CH_Cal_Save_Failed = CAL_SAVE_OK;
-    CH_Calibration_Status = (uint8_t)(step + 1U);
+    Beep_Ctrl(100,1);
 }
+
 
 
 

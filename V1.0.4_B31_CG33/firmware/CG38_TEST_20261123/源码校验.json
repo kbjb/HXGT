@@ -1,0 +1,22 @@
+{
+  "STM32L151/Software/inc/agreement_head.h": "94875b576af4c9e295b83ba14857b938e296fb369b9dc91949689c257f30b2b8",
+  "STM32L151/Software/inc/algorithm_head.h": "8ef01198163a73fe418788d0d740c5f808ab2d8004989cd58d0c16c538d91d0e",
+  "STM32L151/Software/inc/param_head.h": "a130bb2fb8ebf5784255797c23d2d386368a89ccc864175d4582d0d19c7e7f7a",
+  "STM32L151/Software/src/Algorithm_code.c": "4a3dbd497171ac5d6f47690743f10326b08c5e98f46d09c297bfa4f3a0b60c94",
+  "STM32L151/Software/src/App_Eep.c": "61e4cff41046995653a096e0b4da62a42805baf7bc241b13c538082633fab763",
+  "STM32L151/Software/src/App_code.c": "ec71247be0a8d962a0c18a58c5fa6e02d0ebebaad5e84bce99f90be5472e26d6",
+  "STM32L151/Software/src/App_key.c": "74f0ce4b7eb01b12f23bc96207fbf0b06d20caddcc7f0cf681df5eee240eb887",
+  "STM32L151/Software/src/agreement_code.c": "4ad7931aba0eb7c109244799cc9ff15186989f2293e078a278d5b117fc970421",
+  "STM32L151/Software/src/param_code.c": "719fd9ac944728dce8934c4d86d1f842d19325cb1434e33e4ab1bf65cac5b1fe",
+  "docs/guides/CG38_20261123_查照护背测试说明.md": "52d557720f9c1ae6c1fe94344536a2d9f80b53b30d634f6a5b16f3c7dc917873",
+  "tests/B2_HOST_TESTS/test_main.c": "3e63befec3aee8288277d5edbe07e06b47a6c041dd72fdaf138393e7aae8dac8",
+  "tests/B31_HOST_TESTS/test_b31.c": "5d27e427f7c65fa68e64d14274391dc8a4b4a726ef6f29caea9071dba7a757a4",
+  "tests/CG32_HOST_TESTS/run_cg32_tests.sh": "3a8590cb21a49cba6fd58d4d701fafb980dceb768b9a15bd9c56a9529b844e82",
+  "tests/CG38_HOST_TESTS/test_ch.py": "39016d32659c7e1cb2a1380dbf0d18a476c6e3604a6b71a0075eccd3101a37b0",
+  "tests/CG_FIX_HOST_TESTS/test_cg.py": "f45e498807aed46d461e768de71f5de6f68e3bfc3e3befca4544af7f30737f14",
+  "变更日志.md": "8447fcb6079df3dfccb028b0388f4005312df30458566ae0721aec9133f9428d",
+  "QINGJIAOBAN/USER/main.c": "43814a7d84c2cfa3f46224a4563e693a613dd200bbb2f11ea7fd61ad365f1643",
+  "QINGJIAOBAN/USER/main_head.h": "b627946f6b4e5bf9baf1f77a48d1a9d61cf32e4722f86236b84961d72b6796a4",
+  "QINGJIAOBAN/USER/cg_angle_filter.h": "c1ce0e9fb0375895610633583d9b46b73a1eba88a10ec2d7f7ba6e83b15ed956",
+  "STM32L151/MDK-ARM/STM32L151.uvprojx": "8d3b0aa396a318cc125885cc44ddc633a20b380a30591a4a49604f102d3a284b"
+}

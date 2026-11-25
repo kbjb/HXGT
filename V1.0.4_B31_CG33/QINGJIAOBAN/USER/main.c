@@ -4,9 +4,7 @@
 #include "ads1110_head.h"
 #include "adc161_head.h"
 #include "cg_angle_filter.h" /* [CG32-01] */
-#include "cg_timing_watch.h"
 #include "lm9507_head.h"
-#include "lm95071_sample.h"
 
 
 
@@ -24,9 +22,10 @@ GPIO_STR testLed_gpio   = GPIO_CLASS_CREATE(GPIOC,GPIO_Pin_13,GPIO_Mode_Out_PP,G
 GPIO_STR Beep_gpio      = GPIO_CLASS_CREATE(GPIOA,GPIO_Pin_8,GPIO_Mode_Out_PP,GPIO_Speed_50MHz);
 //ADS1110对象创建
 GPIO_STR ads1110_scl_str   = GPIO_CLASS_CREATE(ADS1110_SCL_PORT,ADS1110_SCL_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz); 
-GPIO_STR ads1110_sda_str   = GPIO_CLASS_CREATE(ADS1110_SDA_PORT,ADS1110_SDA_PIN,GPIO_Mode_Out_OD,GPIO_Speed_50MHz);
+GPIO_STR ads1110_sda_str   = GPIO_CLASS_CREATE(ADS1110_SDA_PORT,ADS1110_SDA_PIN,GPIO_Mode_Out_PP,GPIO_Speed_50MHz);
 
-IIC_STR  ads1110_iic_str   = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,64U,NULL);
+static void ADS1110_IIC_Delay(IIC_STR *iic);
+IIC_STR  ads1110_iic_str = IIC_CLASS_CREATE(&ads1110_scl_str,&ads1110_sda_str,0U,ADS1110_IIC_Delay);
 
 ADS1110_STR ads1110_str    = ADS1110_CLASS_STR(&ads1110_iic_str);
 //ADC161对象创建
@@ -130,20 +129,23 @@ void idwg_Init(void)
     IWDG_Enable();
 }
 //变量定义区
+#define ADS1110_BUFFER_SIZE 50
 
 
+volatile uint32_t sensor_tick_ms = 0U;
+volatile uint32_t CG_Sample_Interval_Ms = 0U;
+volatile uint32_t CG_Sample_Overrun_Count = 0U;
 volatile uint8_t  send_en                           = 0; /* [B2] SysTick -> main */
 volatile uint16_t send_cnt                           = 0; /* [B2] 1 ms tick */
 volatile uint32_t uart1_ack_ok_count                  = 0; /* [B2] diagnostic */
 volatile uint32_t uart1_ack_error_count               = 0; /* [B2] diagnostic */
 volatile uint32_t uart1_ack_bad_count                 = 0; /* [B2] malformed ACK */
-float       temper = NAN; /* No valid conversion at boot; preserve wire format. */
-static uint32_t temperature_last_ms = 0U;
+uint8_t     ads1110_cnt                             = 0;
+uint16_t    ads1110_buffer[ADS1110_BUFFER_SIZE];
+uint16_t    ads1110_aver;
+float       temper                                  = 0;
 
 int16_t adc161_aver; /* UART1 inclination payload */
-volatile CG_TIMING_WATCH CG_Sample_Timing; /* actual interval between filter pushes */
-volatile uint32_t CG_Report_Timeouts; /* TXE/TC did not complete in budget */
-volatile CG_TIMING_WATCH CG_Report_Timing; /* report attempts, not on-wire receipt */
 CG_ANGLE_FILTER CG_Angle_Filter; /* Keil Watch: raw/filtered/output */
 
 
@@ -180,13 +182,38 @@ DataParm AngleParam;
 * 输    入         : 无
 * 输    出         : 无
 *******************************************************************************/
+/* [CG34] TIM2 runs at 1 MHz. The F103 clock setup uses APB1=HCLK/2,
+ * so the APB1 timer clock equals SystemCoreClock (72 MHz). */
+static void Sensor_Timer_Init(void)
+{
+    TIM_TimeBaseInitTypeDef timer;
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+    TIM_TimeBaseStructInit(&timer);
+    timer.TIM_Prescaler = (uint16_t)(SystemCoreClock / 1000000U - 1U);
+    timer.TIM_Period = 0xFFFFU;
+    TIM_TimeBaseInit(TIM2, &timer);
+    TIM_Cmd(TIM2, ENABLE);
+}
+
+static void ADS1110_IIC_Delay(IIC_STR *iic)
+{
+    uint16_t start = (uint16_t)TIM_GetCounter(TIM2);
+    (void)iic;
+    while ((uint16_t)((uint16_t)TIM_GetCounter(TIM2) - start) < 5U) {}
+}
+
 int main(void)
 {
+    uint32_t sample_tick = 0U;
+    uint32_t last_sample_tick = 0U;
+    uint32_t auxiliary_tick = 0U;
+    Sensor_Timer_Init();
     /*配置串口1*/ 
     usart1_str.str_init(&usart1_str);
     usart1_str.iqrn = USART1_IQRN; 
     /*配置ADS1110*/
-    ADS1110_Init(&ads1110_str, 0U);
+    ads1110_str.str_init(&ads1110_str);
+    ads1110_str.check(&ads1110_str);
     /*配置ADC161*/
     adc161_str.str_init(&adc161_str);
     /*配置LM9531*/
@@ -201,44 +228,41 @@ int main(void)
     while(1)
     {
         
-        /*
-            距离传感器
-        */
-        ADS1110_Poll(&ads1110_str, sensor_tick_ms);
-        
-        /*
-            倾角传感器
-        */
-        //获取ADC161数据
-        
-        
-        adc161_str.read(&adc161_str);
-        /* [CG32-01] Smooth all signed 16-bit samples, with no 30-AD blind zone.
-         * Remove the old unstable 5-sample accumulator entirely: it could
-         * retain an old sum, and its state machine caused unwanted latching.
-         * Keep AngleParam fields for existing Keil Watch procedures. */
-        adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
-        CG_RecordGap(&CG_Sample_Timing, sensor_tick_ms);
-        AngleParam.realValue = CG_Angle_Filter.filtered_value;
-        AngleParam.StableValue = CG_Angle_Filter.output_value;
-        AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
-        AngleParam.tempCnt = 0U;
-        AngleParam.tempSumValue = 0;
-        AngleParam.flag = 0U;
-
-        
-        /*
-            温度传感器
-        */
-        //获取LM6509温度数据
-        if (LM95071_ReadDue(sensor_tick_ms, temperature_last_ms))
+        uint32_t now = sensor_tick_ms;
+        uint32_t elapsed = (uint32_t)(now - sample_tick);
+        if (elapsed >= SENSOR_SAMPLE_PERIOD_MS)
         {
-            temper = lm9531_str.readTemp(&lm9531_str);
-            /* Measure the next interval from transaction completion, even
-             * when a foreground iteration is delayed. No catch-up bursts. */
-            temperature_last_ms = sensor_tick_ms;
+            sample_tick += SENSOR_SAMPLE_PERIOD_MS;
+            CG_Sample_Interval_Ms = (uint32_t)(now - last_sample_tick);
+            last_sample_tick = now;
+            if (elapsed >= 2U * SENSOR_SAMPLE_PERIOD_MS)
+            {
+                CG_Sample_Overrun_Count++;
+                sample_tick = now; /* Do not fabricate catch-up samples. */
+                CG_AngleFilter_Init(&CG_Angle_Filter);
+            }
+            adc161_str.read(&adc161_str);
+            adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
+            AngleParam.realValue = CG_Angle_Filter.filtered_value;
+            AngleParam.StableValue = CG_Angle_Filter.output_value;
+            AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
+            AngleParam.tempCnt = 0U;
+            AngleParam.tempSumValue = 0;
+            AngleParam.flag = 0U;
         }
-        
+
+        /* Displacement and temperature run at 10 Hz after due angle samples.
+         * The I2C callback uses 5 us timer delays instead of 10000-spin waits. */
+        if ((uint32_t)(now - auxiliary_tick) >= SENSOR_SEND_PERIOD_MS)
+        {
+            auxiliary_tick = now;
+            ads1110_str.read(&ads1110_str);
+            if ((ads1110_str.config >> 7) == 0)
+                ads1110_aver = ads1110_aver * 0.5f +
+                    0.5f * (ads1110_str.ad_data > 0x7FFF ? 0 : ads1110_str.ad_data);
+            temper = lm9531_str.readTemp(&lm9531_str);
+        }
+
         if(usart1_str.rx_ok == 1) /* [B1] Only a 7-byte mainboard ACK is expected. */
         {
             uint8_t uLen = usart1_str.rx_len;
@@ -259,13 +283,11 @@ int main(void)
         if(send_en == 1)
         {
             send_en  = 0; /* [B2] SysTick is the sole TX scheduler. */
-            CG_RecordGap(&CG_Report_Timing, sensor_tick_ms);
             FToI fToI;
             UToI uToI;
             uint8_t buffer[13] = {0x5A};
-            uint16_t gauge_ad = ADS1110_WireValue(&ads1110_str, sensor_tick_ms);
-            buffer[2] = (gauge_ad>>8)&0xFF;
-            buffer[3] =  gauge_ad&0xFF;
+            buffer[2] = (ads1110_aver>>8)&0xFF;
+            buffer[3] =  ads1110_aver&0xFF;
             uToI.inf = adc161_aver;
             buffer[4] = (uToI.uinf>>8)&0xFF;
             buffer[5] =  uToI.uinf&0xFF;
@@ -278,8 +300,7 @@ int main(void)
             buffer[10] = getAdd(buffer,10);
             buffer[11] = 0x0D;
             buffer[12] = 0x0A;
-            if (!USART_TrySendReport(&usart1_str, buffer, sizeof(buffer)))
-                ++CG_Report_Timeouts;
+            usart1_str.send_string(&usart1_str,(char *)buffer,13);
         }
         
 //        IWDG_ReloadCounter();  // 重载计数器

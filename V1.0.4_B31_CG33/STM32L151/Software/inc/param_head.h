@@ -165,6 +165,7 @@ extern float   GJ_Value;
 extern float   CZ_Value;
 extern float   HB_Value;
 extern uint8_t Set_Time[6] ;
+extern uint8_t Set_Time_Error; /* [CG39] 1=read,2=invalid,3=write */
     
 extern uint8_t Set_Time_Select;
 extern uint8_t Set_Time_Select_History;
@@ -198,24 +199,14 @@ extern uint8_t Percision_Menu_Select ;
 extern uint8_t Percision_Menu_Select_History ;
 extern uint8_t Data_Show_Percision ;
 
-enum
-{
-    CAL_SAVE_OK = 0,
-    CAL_SAVE_FAILED,
-    CAL_SAVE_BAD_POINTS,
-    CAL_SAVE_NO_SENSOR,
-    CAL_SAVE_TEMP_ERROR,
-    CAL_SAVE_SENSOR_ERROR
-};
-extern uint8_t CG_Cal_Save_Failed;
-extern uint8_t GJ_Cal_Save_Failed;
-extern uint8_t CH_Cal_Save_Failed;
+extern uint8_t CG_Cal_Save_Failed; /* [CG32-05] 0=OK,1=EEP,2=bad cal,3=no sensor,4=unstable */
 extern uint8_t CG_Calibration_Status;
 extern uint8_t CG_Calibration_Status_History;
 
 extern uint8_t GJ_Calibration_Status;
 extern uint8_t GJ_Calibration_Status_History;
 
+extern uint8_t CH_Cal_Save_Failed; /* [CG38] */
 extern uint8_t CH_Calibration_Status;
 extern uint8_t CH_Calibration_Status_History;
 

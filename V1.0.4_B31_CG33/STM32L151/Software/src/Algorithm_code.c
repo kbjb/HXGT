@@ -2,6 +2,7 @@
 #include "adc_head.h"
 #include "cg_cal_guard.h" /* [CG32-03] */
 #include <stdlib.h>
+#include <float.h>
 
 float TempOffset = 0;
 float CG_Value_r = 0;
@@ -13,42 +14,43 @@ float CG_Zero_Offset = 0;
 //static float B_Center_Offset;
 
 static float K_CG_Left;
-static int16_t CG_Zero_Low;
+static float B_CG_Left;
 static float K_CG_Right;
-static int16_t CG_Zero_High;
+static float B_CG_Right;
 static uint8_t CG_Coefficients_Valid = 0U;
 volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
 
 void CG_Data_Init(void)
 {
+    int16_t zero_low, zero_high;
     /* [CG32-03] Never divide by a tiny or reversed AD separation. */
     CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
-    K_CG_Left = K_CG_Right = 0.0f;
-    CG_Zero_Low = CG_Zero_High = 0;
+    K_CG_Left = 0.0f; B_CG_Left = 0.0f;
+    K_CG_Right = 0.0f; B_CG_Right = 0.0f;
     if (!CG_Coefficients_Valid)
     {
         CG_Result_Status = CG_RESULT_CAL_ERROR;
         return;
     }
-    /* The zero band uses sorted endpoints. Anchor the outer branches
-     * to those very endpoints, even when the recorded zeroes cross, so
-     * there is no discontinuity. Keep +/-180 mm reference points fixed.
-     * Guarded physical span exceeds the maximum zero gap. */
-    CG_Zero_Low = CG_Param.CG_Zero_Left_Ad;
-    CG_Zero_High = CG_Param.CG_Zero_Right_Ad;
-    if (CG_Zero_Low > CG_Zero_High)
-    {
-        int16_t old_low = CG_Zero_Low;
-        CG_Zero_Low = CG_Zero_High;
-        CG_Zero_High = old_low;
-    }
-    K_CG_Left = 180.0f / (float)((int32_t)CG_Param.CG_Max_Left_Ad - CG_Zero_Low);
-    K_CG_Right = -180.0f / (float)((int32_t)CG_Param.CG_Max_Right_Ad - CG_Zero_High);
+    /* [CG35] Anchor each slope to the edge where that branch is entered.
+     * Both horizontal points define the zero interval in either ordering.
+     * Keep the measured negative/positive AD endpoints mapped to +/-180 mm.
+     * The existing span >=4000 and zero gap <=1500 checks ensure both
+     * sorted-edge denominators remain nonzero (at least 2500 AD). */
+    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
+                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
+                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad - (float)zero_low);
+    B_CG_Left = -K_CG_Left * (float)zero_low;
+    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad - (float)zero_high);
+    B_CG_Right = -K_CG_Right * (float)zero_high;
     CG_Result_Status = CG_RESULT_OK;
 }
 
 float Get_CG_Value(int16_t adc_value, float temp)
 {
+    int16_t zero_low, zero_high;
     /* [CG32-03] Returned 0 on errors is NOT a measurement; callers must
      * inspect CG_Result_Status and show an error, not 0.00 mm. */
     CG_Value_r = 0.0f;
@@ -67,10 +69,14 @@ float Get_CG_Value(int16_t adc_value, float temp)
      * the ACTUAL temperature recorded with the four-point calibration.
      * For factory CG_Param.temp=20, results match the previous formula. */
     TempOffset = -0.054637f * (temp - CG_Param.temp);
-    if (adc_value < CG_Zero_Low)
-        CG_Value_t = (float)((int32_t)adc_value - CG_Zero_Low) * K_CG_Left;
-    else if (adc_value > CG_Zero_High)
-        CG_Value_t = (float)((int32_t)adc_value - CG_Zero_High) * K_CG_Right;
+    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
+                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
+                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+    if (adc_value < zero_low)
+        CG_Value_t = (float)adc_value * K_CG_Left + B_CG_Left;
+    else if (adc_value > zero_high)
+        CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
     else
         CG_Value_t = 0.0f;
 
@@ -84,41 +90,67 @@ float Get_CG_Value(int16_t adc_value, float temp)
 }
 
 
-static uint8_t GJ_Result_Valid = 0U;
-
-uint8_t GJ_Result_Is_Valid(void)
+/* [CG38] One fit shared by gauge and CH; retain the existing three-point
+ * least-squares arithmetic and normal gauge results. No second filter. */
+static uint8_t GJ_Fit_Coefficients(float *k, float *b)
 {
-    return GJ_Result_Valid;
+    float x1 = (float)GJ_Param.GJ_1410_Ad;
+    float y1 = 1410.0f;
+    float x2 = (float)GJ_Param.GJ_1435_Ad;
+    float y2 = 1435.0f;
+    float x3 = (float)GJ_Param.GJ_1470_Ad;
+    float y3 = 1470.0f;
+
+    // 计算线性回归参数：y = k * x + b
+    float sumX = x1 + x2 + x3;
+    float sumY = y1 + y2 + y3;
+    float sumXY = x1 * y1 + x2 * y2 + x3 * y3;
+    float sumX2 = x1 * x1 + x2 * x2 + x3 * x3;
+
+    int n = 3;
+    float denominator = n * sumX2 - sumX * sumX;
+    if (denominator <= 0.0f) return 0U;
+    *k = (n * sumXY - sumX * sumY) / denominator;
+    *b = (sumY - *k * sumX) / n;
+    return 1U;
 }
 
-float Get_GJ_Value(uint16_t GJ_Ad, float temp)
+float Get_GJ_Value(uint16_t GJ_Ad,float temp)
 {
-    int32_t x1 = GJ_Param.GJ_1410_Ad;
-    int32_t x2 = GJ_Param.GJ_1435_Ad;
-    int32_t x3 = GJ_Param.GJ_1470_Ad;
-    float d21, d31, d32, slope, centered, value;
-
-    (void)temp; /* There is no experimentally established GJ thermal model. */
-    GJ_Result_Valid = 0U;
-    if (GJ_Ad > 0x7FFFU) return 0.0f; /* unavailable ADS1110 gauge data */
-    /* As in EEPROM validation, either sensor direction is permitted, but
-     * equal or nonmonotonic points cannot calibrate this measurement. */
-    if (!((x1 < x2 && x2 < x3) || (x1 > x2 && x2 > x3)))
-        return 0.0f; /* Error sentinel, NOT a gauge reading. */
-
-    d21 = (float)(x2 - x1);
-    d31 = (float)(x3 - x1);
-    d32 = (float)(x3 - x2);
-    /* Least-squares covariance/variance via pairwise differences:
-     * identical model, without subtracting large near-equal numbers. */
-    slope = (25.0f * d21 + 60.0f * d31 + 35.0f * d32) /
-            (d21*d21 + d31*d31 + d32*d32);
-    centered = (float)((int32_t)GJ_Ad - x2) - (d32 - d21) / 3.0f;
-    value = (4315.0f / 3.0f) + slope * centered;
-    GJ_Result_Valid = 1U;
-    return value;
+    float k, b;
+    (void)temp; /* Gauge has no temperature correction in the current model. */
+    if (!GJ_Fit_Coefficients(&k,&b)) return (1410.0f+1435.0f+1470.0f)/3.0f;
+    GJ_Value = k * GJ_Ad + b;
+    return GJ_Value;
 }
 
+uint8_t GJ_Get_Valid_Scale(float *scale)
+{
+    uint16_t a=GJ_Param.GJ_1410_Ad, b=GJ_Param.GJ_1435_Ad, c=GJ_Param.GJ_1470_Ad;
+    float offset;
+    if (scale == NULL || a==0U || b==0U || c==0U ||
+        a>0x7FFFU || b>0x7FFFU || c>0x7FFFU ||
+        !(((a<b)&&(b<c)) || ((a>b)&&(b>c))) ||
+        !(GJ_Param.temp>=-40.0f && GJ_Param.temp<=100.0f)) return 0U;
+    if (!GJ_Fit_Coefficients(scale,&offset)) return 0U;
+    return ((*scale>0.0f || *scale<0.0f) && fabsf(*scale)<=FLT_MAX) ? 1U : 0U;
+}
+
+uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb)
+{
+    float scale;
+    if (cz==NULL || hb==NULL || ad==0U || ad>0x7FFFU ||
+        CH_Param.CZ_Ad==0U || CH_Param.CZ_Ad>0x7FFFU ||
+        CH_Param.HB_Ad==0U || CH_Param.HB_Ad>0x7FFFU ||
+        !(CH_Param.temp>=-40.0f && CH_Param.temp<=100.0f) ||
+        !GJ_Get_Valid_Scale(&scale)) return 0U;
+    /* Independent contact references may have identical AD. Subtract in
+     * signed arithmetic so a movement below either reference stays negative.
+     * Shared mechanical ratio/direction must be checked on the actual heads. */
+    *cz = CH_CZ_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.CZ_Ad);
+    *hb = CH_HB_REFERENCE_MM + scale * ((int32_t)ad-(int32_t)CH_Param.HB_Ad);
+    return 1U;
+}
 
 
 static uint8_t  Power_Ad_Cache_Index = 0,Power_Ad_Cache_Count = 0;

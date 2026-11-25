@@ -35,7 +35,6 @@ typedef struct USART_CLASS_STR
 
 
 void USART_STR_INIT(USATR_STR *usart_str);
-uint8_t USART_TrySendReport(USATR_STR *p, const uint8_t *data, uint8_t len);
 
 #define USART_CLASS_CREATE(_usart,_rx_buffer,_boud)\
 {\
