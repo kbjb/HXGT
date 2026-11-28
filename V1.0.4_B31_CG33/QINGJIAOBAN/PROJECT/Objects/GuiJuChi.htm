@@ -3,7 +3,7 @@
 <title>Static Call Graph - [.\Objects\GuiJuChi.axf]</title></head>
 <body><HR>
 <H1>Static Call Graph for image .\Objects\GuiJuChi.axf</H1><HR>
-<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Mon Nov 23 16:00:16 2026
+<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Sat Nov 28 11:38:15 2026
 <BR><P>
 <H3>Maximum Stack Usage =        100 bytes + Unknown(Cycles, Untraceable Function Pointers)</H3><H3>
 Call chain for Maximum Stack Depth:</H3>
@@ -536,8 +536,10 @@ Global Symbols
 </UL>
 <BR>[Address Reference Count : 1]<UL><LI> lm9507_code.o(i.LM9507_STR_INIT)
 </UL>
-<P><STRONG><a name="[70]"></a>LM9507_DELAY</STRONG> (Thumb, 12 bytes, Stack size 0 bytes, lm9507_code.o(i.LM9507_DELAY))
-<BR><BR>[Called By]<UL><LI><a href="#[53]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LM9507_WRITE
+<P><STRONG><a name="[70]"></a>LM9507_DELAY</STRONG> (Thumb, 22 bytes, Stack size 8 bytes, lm9507_code.o(i.LM9507_DELAY))
+<BR><BR>[Stack]<UL><LI>Max Depth = 8<LI>Call Chain = LM9507_DELAY
+</UL>
+<BR>[Called By]<UL><LI><a href="#[53]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LM9507_WRITE
 <LI><a href="#[54]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LM9507_READ
 </UL>
 
@@ -547,7 +549,7 @@ Global Symbols
 <BR>[Address Reference Count : 1]<UL><LI> lm9507_code.o(i.LM9507_STR_INIT)
 </UL>
 <P><STRONG><a name="[54]"></a>LM9507_READ</STRONG> (Thumb, 66 bytes, Stack size 16 bytes, lm9507_code.o(i.LM9507_READ))
-<BR><BR>[Stack]<UL><LI>Max Depth = 16<LI>Call Chain = LM9507_READ
+<BR><BR>[Stack]<UL><LI>Max Depth = 24<LI>Call Chain = LM9507_READ &rArr; LM9507_DELAY
 </UL>
 <BR>[Calls]<UL><LI><a href="#[70]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LM9507_DELAY
 </UL>
@@ -559,7 +561,7 @@ Global Symbols
 <BR>[Address Reference Count : 1]<UL><LI> main.o(.data)
 </UL>
 <P><STRONG><a name="[53]"></a>LM9507_WRITE</STRONG> (Thumb, 70 bytes, Stack size 16 bytes, lm9507_code.o(i.LM9507_WRITE))
-<BR><BR>[Stack]<UL><LI>Max Depth = 16<LI>Call Chain = LM9507_WRITE
+<BR><BR>[Stack]<UL><LI>Max Depth = 24<LI>Call Chain = LM9507_WRITE &rArr; LM9507_DELAY
 </UL>
 <BR>[Calls]<UL><LI><a href="#[70]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LM9507_DELAY
 </UL>

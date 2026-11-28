@@ -1,0 +1,39 @@
+[before -O3]
+LM9507_DELAY
+        0x00000000:    1e40        @.      SUBS     r0,r0,#1
+        0x00000002:    d2fd        ..      BCS      LM9507_DELAY ; 0x0
+        0x00000004:    4770        pG      BX       lr
+[after -O0]
+LM9507_DELAY
+        0x00000000:    b508        ..      PUSH     {r3,lr}
+        0x00000002:    9000        ..      STR      r0,[sp,#0]
+        0x00000004:    e003        ..      B        {pc}+0xa ; 0xe
+        0x00000006:    bf00        ..      NOP      
+        0x00000008:    9900        ..      LDR      r1,[sp,#0]
+        0x0000000a:    1e49        I.      SUBS     r1,r1,#1
+        0x0000000c:    9100        ..      STR      r1,[sp,#0]
+        0x0000000e:    9900        ..      LDR      r1,[sp,#0]
+        0x00000010:    2900        .)      CMP      r1,#0
+        0x00000012:    d1f8        ..      BNE      {pc}-0xc ; 0x6
+        0x00000014:    bd08        ..      POP      {r3,pc}
+[after -O2]
+LM9507_DELAY
+        0x00000000:    b508        ..      PUSH     {r3,lr}
+        0x00000002:    2800        .(      CMP      r0,#0
+        0x00000004:    9000        ..      STR      r0,[sp,#0]
+        0x00000006:    d002        ..      BEQ      {pc}+0x8 ; 0xe
+        0x00000008:    bf00        ..      NOP      
+        0x0000000a:    1e40        @.      SUBS     r0,r0,#1
+        0x0000000c:    e7f9        ..      B        {pc}-0xa ; 0x2
+        0x0000000e:    bd08        ..      POP      {r3,pc}
+[after -O3]
+LM9507_DELAY
+        0x00000000:    b508        ..      PUSH     {r3,lr}
+        0x00000002:    2800        .(      CMP      r0,#0
+        0x00000004:    9000        ..      STR      r0,[sp,#0]
+        0x00000006:    d002        ..      BEQ      {pc}+0x8 ; 0xe
+        0x00000008:    bf00        ..      NOP      
+        0x0000000a:    1e40        @.      SUBS     r0,r0,#1
+        0x0000000c:    e7f9        ..      B        {pc}-0xa ; 0x2
+        0x0000000e:    bd08        ..      POP      {r3,pc}
+ARMCC delay disassembly: PASS; real CMSIS, Cortex-M3 O0/O2/O3 retained NOP, counter store and loop

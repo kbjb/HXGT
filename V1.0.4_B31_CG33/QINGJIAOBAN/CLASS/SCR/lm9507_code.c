@@ -2,7 +2,14 @@
 
 void LM9507_DELAY(uint32_t time)
 {
-    while(time--);
+    /* [CG40] Volatile loop state and CMSIS NOP retain the wait even
+     * when optimized. The argument counts iterations, not microseconds. */
+    volatile uint32_t remaining = time;
+    while (remaining > 0U)
+    {
+        __NOP();
+        remaining--;
+    }
 }
 
 void LM9507_INIT(LM9507_STR *lm9507_str)

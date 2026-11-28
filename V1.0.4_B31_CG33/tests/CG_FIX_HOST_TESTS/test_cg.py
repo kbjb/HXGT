@@ -78,113 +78,9 @@ uint8_t Get_Driver_Power(uint16_t PowerAd);
     guard = get('STM32L151/Software/inc/cg_cal_guard.h').replace('#include "param_head.h"', '#include "Algorithm_head.h"')
     (d / 'cg_cal_guard.h').write_text(guard, encoding='utf-8')
     (d / 'Algorithm_code.c').write_text(algo, encoding='utf-8')
-    (d / 'test_math.c').write_text(r'''
-#include <stdio.h>
-#include <assert.h>
-#include <math.h>
-#include "Algorithm_head.h"
-extern float CG_Value_t;
-
-static void check_zero_edges(int16_t left_zero, int16_t right_zero,
-                             int16_t left_max, int16_t right_max)
-{
-    int32_t ad;
-    int16_t low = left_zero < right_zero ? left_zero : right_zero;
-    int16_t high = left_zero > right_zero ? left_zero : right_zero;
-    float left_step = 180.0f / ((float)low - left_max);
-    float right_step = 180.0f / ((float)right_max - high);
-    float largest_step = fmaxf(left_step, right_step);
-    float previous;
-    CG_Param = (CG_Calibration_Param_Str){left_zero,left_max,right_zero,right_max,23.0f};
-    left_And_Righe_Status = 1;
-    CG_Data_Init();
-    assert(CG_Result_Status == CG_RESULT_OK);
-    assert(fabsf(Get_CG_Value(left_max,23)-180.0f)<0.001f);
-    assert(fabsf(Get_CG_Value(right_max,23)+180.0f)<0.001f);
-    assert(fabsf(Get_CG_Value(low,23))<0.001f);
-    assert(fabsf(Get_CG_Value(high,23))<0.001f);
-    if (low>INT16_MIN) {
-        Get_CG_Value((int16_t)(low-1),23);
-        assert(fabsf(CG_Value_t-left_step)<0.001f);
-    }
-    if (high<INT16_MAX) {
-        Get_CG_Value((int16_t)(high+1),23);
-        assert(fabsf(CG_Value_t+right_step)<0.001f);
-    }
-    Get_CG_Value(INT16_MIN,23);
-    previous=CG_Value_t;
-    for (ad=(int32_t)INT16_MIN+1;ad<=INT16_MAX;++ad) {
-        Get_CG_Value((int16_t)ad,23);
-        assert(CG_Result_Status==CG_RESULT_OK);
-        assert(CG_Value_t<=previous+0.001f);
-        assert(previous-CG_Value_t<=largest_step+0.001f);
-        previous=CG_Value_t;
-    }
-    left_And_Righe_Status=-1;
-    assert(fabsf(Get_CG_Value(left_max,23)+180.0f)<0.001f);
-    assert(fabsf(Get_CG_Value(right_max,23)-180.0f)<0.001f);
-    left_And_Righe_Status=1;
-    assert(fabsf(Get_CG_Value(low,25)-0.10f)<0.001f);
-}
-
-CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
-GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
-CH_Calibration_Param_Str CH_Param = {10318,10318,20};
-int8_t left_And_Righe_Status = 1;
-float POWER_Vol = 3.3f, GJ_Value = 0;
-float ADC_GetVrefintVoltage(void) {return 3.3f;}
-int main(void) {
-  /* Before the coefficients are initialized, all CG AD values map to 0 at 20C. */
-  assert(Get_CG_Value(-12445,20) == 0.0f);
-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
-  CG_Data_Init();
-  assert(fabsf(Get_CG_Value(-12445,20) - 180.0f) < 0.051f);
-  assert(fabsf(Get_CG_Value(12513,20) + 180.0f) < 0.051f);
-  assert(fabsf(Get_CG_Value(10,20)) < 0.051f);
-  left_And_Righe_Status = -1;
-  assert(fabsf(Get_CG_Value(-12445,20) + 180.0f) < 0.051f);
-  left_And_Righe_Status = 1;
-  CG_Param.CG_Zero_Left_Ad=100;
-  CG_Param.CG_Max_Left_Ad=-9000;
-  CG_Param.CG_Zero_Right_Ad=150;
-  CG_Param.CG_Max_Right_Ad=9000;
-  CG_Data_Init();
-  assert(fabsf(Get_CG_Value(-9000,20) - 180.0f) < 0.051f);
-  assert(fabsf(Get_CG_Value(9000,20) + 180.0f) < 0.051f);
-  assert(fabsf(Get_CG_Value(110,20)) < 0.051f);
-  CG_Param.CG_Zero_Left_Ad=10; CG_Param.CG_Max_Left_Ad=0;
-  CG_Data_Init();
-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
-  assert(Get_CG_Value(-70,20)==0.0f);
-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
-  CG_Param.CG_Zero_Left_Ad=1; CG_Param.CG_Max_Left_Ad=-12445;
-  CG_Param.CG_Zero_Right_Ad=50; CG_Param.CG_Max_Right_Ad=12513;
-  CG_Param.temp=23;
-  CG_Data_Init();
-  assert(fabsf(Get_CG_Value(25,23))<0.001f);
-  assert(CG_Result_Status == CG_RESULT_OK);
-  assert(fabsf(Get_CG_Value(25,25)-0.10f)<0.06f);
-  assert(Get_CG_Value(-30000,23)>400.0f);
-  assert(CG_Result_Status == CG_RESULT_OK);
-  assert(Get_CG_Value(30000,23)<-400.0f);
-  assert(CG_Result_Status == CG_RESULT_OK);
-  assert(Get_CG_Value(100,105)==0.0f);
-  assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
-
-  /* All 65536 AD codes are swept in normal, reversed, and equal-zero cases.
-   * Include large zero gaps, signed endpoints, and minimum allowed spans. */
-  check_zero_edges(1,50,-12445,12513);
-  check_zero_edges(50,1,-12445,12513);
-  check_zero_edges(50,50,-12445,12513);
-  check_zero_edges(750,-750,-3250,3250);
-  check_zero_edges(-750,750,-4750,4750);
-  check_zero_edges(28000,27000,24000,32000);
-  check_zero_edges(-28000,-27000,-32768,-23000);
-  puts("CG35 zero edges: PASS; full 16-bit sweeps, both zero orders, endpoints, direction, temperature");
-  puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference");
-  return 0;
-}
-''')
+    (d / 'test_math.c').write_text(
+        (root / 'tests/CG40_HOST_TESTS/test_math.c').read_text(encoding='utf-8'),
+        encoding='utf-8')
     func = extract_c_function(key, 'void CG_Calibration_Storage(void)')
     (d / 'test_key.c').write_text(r'''
 #include <stdio.h>
@@ -331,11 +227,13 @@ int main(void) {
 """,encoding='utf-8')
 
     for source, out, more in [('test_math.c','test_math',['Algorithm_code.c','-lm']), ('test_key.c','test_key',[]), ('test_display.c','test_display',[])]:
-        cmd=['cc','-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
-             '-fsanitize=undefined','-fno-omit-frame-pointer','-I',str(d),str(d/source)]
+        cmd=[os.environ.get('CC','cc'),'-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
+             '-fno-omit-frame-pointer','-I',str(d),str(d/source)]
+        if os.environ.get('HOST_SANITIZERS','1')!='0':
+            cmd += ['-fsanitize=undefined']
         for v in more:
             cmd.append(str(d/v) if v.endswith('.c') else v)
         cmd += ['-o',str(d/out)]
-        subprocess.run(cmd,check=True,capture_output=True,text=True)
+        subprocess.run(cmd,check=True)
         subprocess.run([str(d/out)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
 print('CG integration static checks: PASS; EEPROM production switches unchanged')

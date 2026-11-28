@@ -14,43 +14,38 @@ float CG_Zero_Offset = 0;
 //static float B_Center_Offset;
 
 static float K_CG_Left;
-static float B_CG_Left;
 static float K_CG_Right;
-static float B_CG_Right;
+static float CG_Zero_Mid_Ad; /* [CG40] Absolute zero, including half an AD. */
 static uint8_t CG_Coefficients_Valid = 0U;
 volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
 
 void CG_Data_Init(void)
 {
-    int16_t zero_low, zero_high;
     /* [CG32-03] Never divide by a tiny or reversed AD separation. */
     CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
-    K_CG_Left = 0.0f; B_CG_Left = 0.0f;
-    K_CG_Right = 0.0f; B_CG_Right = 0.0f;
+    K_CG_Left = 0.0f; K_CG_Right = 0.0f;
+    CG_Zero_Mid_Ad = 0.0f;
     if (!CG_Coefficients_Valid)
     {
         CG_Result_Status = CG_RESULT_CAL_ERROR;
         return;
     }
-    /* [CG35] Anchor each slope to the edge where that branch is entered.
-     * Both horizontal points define the zero interval in either ordering.
-     * Keep the measured negative/positive AD endpoints mapped to +/-180 mm.
-     * The existing span >=4000 and zero gap <=1500 checks ensure both
-     * sorted-edge denominators remain nonzero (at least 2500 AD). */
-    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
-                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
-                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad - (float)zero_low);
-    B_CG_Left = -K_CG_Left * (float)zero_low;
-    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad - (float)zero_high);
-    B_CG_Right = -K_CG_Right * (float)zero_high;
+    /* [CG40] Pair 180 mm and horizontal captures in the SAME orientation.
+     * Their difference cancels the calibration bench's residual inclination.
+     * The existing guard requires each signed span to be at least 4000 AD.
+     * Average the two horizontal captures in float: no zero plateau, no
+     * int16_t sum overflow, and no truncation of a half-count midpoint. */
+    CG_Zero_Mid_Ad = ((float)CG_Param.CG_Zero_Left_Ad +
+                      (float)CG_Param.CG_Zero_Right_Ad) * 0.5f;
+    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad -
+                          (float)CG_Param.CG_Zero_Left_Ad);
+    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad -
+                            (float)CG_Param.CG_Zero_Right_Ad);
     CG_Result_Status = CG_RESULT_OK;
 }
 
 float Get_CG_Value(int16_t adc_value, float temp)
 {
-    int16_t zero_low, zero_high;
     /* [CG32-03] Returned 0 on errors is NOT a measurement; callers must
      * inspect CG_Result_Status and show an error, not 0.00 mm. */
     CG_Value_r = 0.0f;
@@ -69,22 +64,21 @@ float Get_CG_Value(int16_t adc_value, float temp)
      * the ACTUAL temperature recorded with the four-point calibration.
      * For factory CG_Param.temp=20, results match the previous formula. */
     TempOffset = -0.054637f * (temp - CG_Param.temp);
-    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
-                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
-                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
-    if (adc_value < zero_low)
-        CG_Value_t = (float)adc_value * K_CG_Left + B_CG_Left;
-    else if (adc_value > zero_high)
-        CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
+    /* Both branches meet at the same absolute zero. Center before
+     * multiplying to avoid cancellation between K*AD and a large intercept. */
+    if ((float)adc_value < CG_Zero_Mid_Ad)
+        CG_Value_t = ((float)adc_value - CG_Zero_Mid_Ad) * K_CG_Left;
     else
-        CG_Value_t = 0.0f;
+        CG_Value_t = ((float)adc_value - CG_Zero_Mid_Ad) * K_CG_Right;
 
     /* [CG33-01] Display out-of-range numeric measurements for diagnostics.
      * Do not suppress values beyond +/-240 mm. This does not establish
      * accuracy or replace the calibration and sensor-integrity checks. */
     CG_Value_r = roundf((CG_Value_t - TempOffset) / 0.05f) *
                  0.05f * (float)left_And_Righe_Status;
+    /* [CG40] roundf and the direction multiplier can produce IEEE -0.
+     * Normalize after both operations so snprintf always prints +0.00. */
+    if (CG_Value_r == 0.0f) CG_Value_r = 0.0f;
     CG_Result_Status = CG_RESULT_OK;
     return CG_Value_r;
 }

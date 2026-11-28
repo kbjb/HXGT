@@ -30,7 +30,7 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG39 TEST",FONT_8X16);
+    OLED_PrintString(40,4,"CG40 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);

@@ -1,0 +1,741 @@
+diff --git a/V1.0.4_B31_CG33/QINGJIAOBAN/CLASS/SCR/lm9507_code.c b/V1.0.4_B31_CG33/QINGJIAOBAN/CLASS/SCR/lm9507_code.c
+index 40d3895..f2d4f39 100644
+--- a/V1.0.4_B31_CG33/QINGJIAOBAN/CLASS/SCR/lm9507_code.c
++++ b/V1.0.4_B31_CG33/QINGJIAOBAN/CLASS/SCR/lm9507_code.c
+@@ -2,7 +2,14 @@
+ 
+ void LM9507_DELAY(uint32_t time)
+ {
+-    while(time--);
++    /* [CG40] Volatile loop state and CMSIS NOP retain the wait even
++     * when optimized. The argument counts iterations, not microseconds. */
++    volatile uint32_t remaining = time;
++    while (remaining > 0U)
++    {
++        __NOP();
++        remaining--;
++    }
+ }
+ 
+ void LM9507_INIT(LM9507_STR *lm9507_str)
+diff --git a/V1.0.4_B31_CG33/STM32L151/Software/src/Algorithm_code.c b/V1.0.4_B31_CG33/STM32L151/Software/src/Algorithm_code.c
+index 54be324..bdb133a 100644
+--- a/V1.0.4_B31_CG33/STM32L151/Software/src/Algorithm_code.c
++++ b/V1.0.4_B31_CG33/STM32L151/Software/src/Algorithm_code.c
+@@ -14,43 +14,38 @@ float CG_Zero_Offset = 0;
+ //static float B_Center_Offset;
+ 
+ static float K_CG_Left;
+-static float B_CG_Left;
+ static float K_CG_Right;
+-static float B_CG_Right;
++static float CG_Zero_Mid_Ad; /* [CG40] Absolute zero, including half an AD. */
+ static uint8_t CG_Coefficients_Valid = 0U;
+ volatile uint8_t CG_Result_Status = CG_RESULT_CAL_ERROR;
+ 
+ void CG_Data_Init(void)
+ {
+-    int16_t zero_low, zero_high;
+     /* [CG32-03] Never divide by a tiny or reversed AD separation. */
+     CG_Coefficients_Valid = CG_Calibration_Sane(&CG_Param);
+-    K_CG_Left = 0.0f; B_CG_Left = 0.0f;
+-    K_CG_Right = 0.0f; B_CG_Right = 0.0f;
++    K_CG_Left = 0.0f; K_CG_Right = 0.0f;
++    CG_Zero_Mid_Ad = 0.0f;
+     if (!CG_Coefficients_Valid)
+     {
+         CG_Result_Status = CG_RESULT_CAL_ERROR;
+         return;
+     }
+-    /* [CG35] Anchor each slope to the edge where that branch is entered.
+-     * Both horizontal points define the zero interval in either ordering.
+-     * Keep the measured negative/positive AD endpoints mapped to +/-180 mm.
+-     * The existing span >=4000 and zero gap <=1500 checks ensure both
+-     * sorted-edge denominators remain nonzero (at least 2500 AD). */
+-    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
+-                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+-    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
+-                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+-    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad - (float)zero_low);
+-    B_CG_Left = -K_CG_Left * (float)zero_low;
+-    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad - (float)zero_high);
+-    B_CG_Right = -K_CG_Right * (float)zero_high;
++    /* [CG40] Pair 180 mm and horizontal captures in the SAME orientation.
++     * Their difference cancels the calibration bench's residual inclination.
++     * The existing guard requires each signed span to be at least 4000 AD.
++     * Average the two horizontal captures in float: no zero plateau, no
++     * int16_t sum overflow, and no truncation of a half-count midpoint. */
++    CG_Zero_Mid_Ad = ((float)CG_Param.CG_Zero_Left_Ad +
++                      (float)CG_Param.CG_Zero_Right_Ad) * 0.5f;
++    K_CG_Left = 180.0f / ((float)CG_Param.CG_Max_Left_Ad -
++                          (float)CG_Param.CG_Zero_Left_Ad);
++    K_CG_Right = -180.0f / ((float)CG_Param.CG_Max_Right_Ad -
++                            (float)CG_Param.CG_Zero_Right_Ad);
+     CG_Result_Status = CG_RESULT_OK;
+ }
+ 
+ float Get_CG_Value(int16_t adc_value, float temp)
+ {
+-    int16_t zero_low, zero_high;
+     /* [CG32-03] Returned 0 on errors is NOT a measurement; callers must
+      * inspect CG_Result_Status and show an error, not 0.00 mm. */
+     CG_Value_r = 0.0f;
+@@ -69,22 +64,21 @@ float Get_CG_Value(int16_t adc_value, float temp)
+      * the ACTUAL temperature recorded with the four-point calibration.
+      * For factory CG_Param.temp=20, results match the previous formula. */
+     TempOffset = -0.054637f * (temp - CG_Param.temp);
+-    zero_low = (CG_Param.CG_Zero_Left_Ad < CG_Param.CG_Zero_Right_Ad) ?
+-                CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+-    zero_high = (CG_Param.CG_Zero_Left_Ad > CG_Param.CG_Zero_Right_Ad) ?
+-                 CG_Param.CG_Zero_Left_Ad : CG_Param.CG_Zero_Right_Ad;
+-    if (adc_value < zero_low)
+-        CG_Value_t = (float)adc_value * K_CG_Left + B_CG_Left;
+-    else if (adc_value > zero_high)
+-        CG_Value_t = (float)adc_value * K_CG_Right + B_CG_Right;
++    /* Both branches meet at the same absolute zero. Center before
++     * multiplying to avoid cancellation between K*AD and a large intercept. */
++    if ((float)adc_value < CG_Zero_Mid_Ad)
++        CG_Value_t = ((float)adc_value - CG_Zero_Mid_Ad) * K_CG_Left;
+     else
+-        CG_Value_t = 0.0f;
++        CG_Value_t = ((float)adc_value - CG_Zero_Mid_Ad) * K_CG_Right;
+ 
+     /* [CG33-01] Display out-of-range numeric measurements for diagnostics.
+      * Do not suppress values beyond +/-240 mm. This does not establish
+      * accuracy or replace the calibration and sensor-integrity checks. */
+     CG_Value_r = roundf((CG_Value_t - TempOffset) / 0.05f) *
+                  0.05f * (float)left_And_Righe_Status;
++    /* [CG40] roundf and the direction multiplier can produce IEEE -0.
++     * Normalize after both operations so snprintf always prints +0.00. */
++    if (CG_Value_r == 0.0f) CG_Value_r = 0.0f;
+     CG_Result_Status = CG_RESULT_OK;
+     return CG_Value_r;
+ }
+diff --git a/V1.0.4_B31_CG33/STM32L151/Software/src/App_code.c b/V1.0.4_B31_CG33/STM32L151/Software/src/App_code.c
+index cab3fe0..81e8eb9 100644
+--- a/V1.0.4_B31_CG33/STM32L151/Software/src/App_code.c
++++ b/V1.0.4_B31_CG33/STM32L151/Software/src/App_code.c
+@@ -30,7 +30,7 @@ void logo_Page_Reflash(void)
+ {
+     uint32_t CurrentTime=HAL_GetTick();
+     
+-    OLED_PrintString(40,4,"CG39 TEST",FONT_8X16);
++    OLED_PrintString(40,4,"CG40 TEST",FONT_8X16);
+     if((CurrentTime-ReflashTime)>1500)
+     {
+         set_PageId(page_main);
+diff --git a/V1.0.4_B31_CG33/tests/CG32_HOST_TESTS/run_cg32_tests.sh b/V1.0.4_B31_CG33/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+index ad7aef4..5035435 100644
+--- a/V1.0.4_B31_CG33/tests/CG32_HOST_TESTS/run_cg32_tests.sh
++++ b/V1.0.4_B31_CG33/tests/CG32_HOST_TESTS/run_cg32_tests.sh
+@@ -11,6 +11,7 @@ cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-po
+ UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
+ python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
+ python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
++python3 "$TESTS/CG40_HOST_TESTS/test_temperature.py"
+ python3 "$TESTS/CG38_HOST_TESTS/test_ch.py"
+ python3 "$TESTS/CG39_HOST_TESTS/test_ui.py"
+ sh "$TESTS/B31_HOST_TESTS/run_b31_tests.sh"
+diff --git a/V1.0.4_B31_CG33/tests/CG_FIX_HOST_TESTS/test_cg.py b/V1.0.4_B31_CG33/tests/CG_FIX_HOST_TESTS/test_cg.py
+index d1e0b69..9075c8f 100644
+--- a/V1.0.4_B31_CG33/tests/CG_FIX_HOST_TESTS/test_cg.py
++++ b/V1.0.4_B31_CG33/tests/CG_FIX_HOST_TESTS/test_cg.py
+@@ -78,113 +78,9 @@ uint8_t Get_Driver_Power(uint16_t PowerAd);
+     guard = get('STM32L151/Software/inc/cg_cal_guard.h').replace('#include "param_head.h"', '#include "Algorithm_head.h"')
+     (d / 'cg_cal_guard.h').write_text(guard, encoding='utf-8')
+     (d / 'Algorithm_code.c').write_text(algo, encoding='utf-8')
+-    (d / 'test_math.c').write_text(r'''
+-#include <stdio.h>
+-#include <assert.h>
+-#include <math.h>
+-#include "Algorithm_head.h"
+-extern float CG_Value_t;
+-
+-static void check_zero_edges(int16_t left_zero, int16_t right_zero,
+-                             int16_t left_max, int16_t right_max)
+-{
+-    int32_t ad;
+-    int16_t low = left_zero < right_zero ? left_zero : right_zero;
+-    int16_t high = left_zero > right_zero ? left_zero : right_zero;
+-    float left_step = 180.0f / ((float)low - left_max);
+-    float right_step = 180.0f / ((float)right_max - high);
+-    float largest_step = fmaxf(left_step, right_step);
+-    float previous;
+-    CG_Param = (CG_Calibration_Param_Str){left_zero,left_max,right_zero,right_max,23.0f};
+-    left_And_Righe_Status = 1;
+-    CG_Data_Init();
+-    assert(CG_Result_Status == CG_RESULT_OK);
+-    assert(fabsf(Get_CG_Value(left_max,23)-180.0f)<0.001f);
+-    assert(fabsf(Get_CG_Value(right_max,23)+180.0f)<0.001f);
+-    assert(fabsf(Get_CG_Value(low,23))<0.001f);
+-    assert(fabsf(Get_CG_Value(high,23))<0.001f);
+-    if (low>INT16_MIN) {
+-        Get_CG_Value((int16_t)(low-1),23);
+-        assert(fabsf(CG_Value_t-left_step)<0.001f);
+-    }
+-    if (high<INT16_MAX) {
+-        Get_CG_Value((int16_t)(high+1),23);
+-        assert(fabsf(CG_Value_t+right_step)<0.001f);
+-    }
+-    Get_CG_Value(INT16_MIN,23);
+-    previous=CG_Value_t;
+-    for (ad=(int32_t)INT16_MIN+1;ad<=INT16_MAX;++ad) {
+-        Get_CG_Value((int16_t)ad,23);
+-        assert(CG_Result_Status==CG_RESULT_OK);
+-        assert(CG_Value_t<=previous+0.001f);
+-        assert(previous-CG_Value_t<=largest_step+0.001f);
+-        previous=CG_Value_t;
+-    }
+-    left_And_Righe_Status=-1;
+-    assert(fabsf(Get_CG_Value(left_max,23)+180.0f)<0.001f);
+-    assert(fabsf(Get_CG_Value(right_max,23)-180.0f)<0.001f);
+-    left_And_Righe_Status=1;
+-    assert(fabsf(Get_CG_Value(low,25)-0.10f)<0.001f);
+-}
+-
+-CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
+-GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
+-CH_Calibration_Param_Str CH_Param = {10318,10318,20};
+-int8_t left_And_Righe_Status = 1;
+-float POWER_Vol = 3.3f, GJ_Value = 0;
+-float ADC_GetVrefintVoltage(void) {return 3.3f;}
+-int main(void) {
+-  /* Before the coefficients are initialized, all CG AD values map to 0 at 20C. */
+-  assert(Get_CG_Value(-12445,20) == 0.0f);
+-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
+-  CG_Data_Init();
+-  assert(fabsf(Get_CG_Value(-12445,20) - 180.0f) < 0.051f);
+-  assert(fabsf(Get_CG_Value(12513,20) + 180.0f) < 0.051f);
+-  assert(fabsf(Get_CG_Value(10,20)) < 0.051f);
+-  left_And_Righe_Status = -1;
+-  assert(fabsf(Get_CG_Value(-12445,20) + 180.0f) < 0.051f);
+-  left_And_Righe_Status = 1;
+-  CG_Param.CG_Zero_Left_Ad=100;
+-  CG_Param.CG_Max_Left_Ad=-9000;
+-  CG_Param.CG_Zero_Right_Ad=150;
+-  CG_Param.CG_Max_Right_Ad=9000;
+-  CG_Data_Init();
+-  assert(fabsf(Get_CG_Value(-9000,20) - 180.0f) < 0.051f);
+-  assert(fabsf(Get_CG_Value(9000,20) + 180.0f) < 0.051f);
+-  assert(fabsf(Get_CG_Value(110,20)) < 0.051f);
+-  CG_Param.CG_Zero_Left_Ad=10; CG_Param.CG_Max_Left_Ad=0;
+-  CG_Data_Init();
+-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
+-  assert(Get_CG_Value(-70,20)==0.0f);
+-  assert(CG_Result_Status == CG_RESULT_CAL_ERROR);
+-  CG_Param.CG_Zero_Left_Ad=1; CG_Param.CG_Max_Left_Ad=-12445;
+-  CG_Param.CG_Zero_Right_Ad=50; CG_Param.CG_Max_Right_Ad=12513;
+-  CG_Param.temp=23;
+-  CG_Data_Init();
+-  assert(fabsf(Get_CG_Value(25,23))<0.001f);
+-  assert(CG_Result_Status == CG_RESULT_OK);
+-  assert(fabsf(Get_CG_Value(25,25)-0.10f)<0.06f);
+-  assert(Get_CG_Value(-30000,23)>400.0f);
+-  assert(CG_Result_Status == CG_RESULT_OK);
+-  assert(Get_CG_Value(30000,23)<-400.0f);
+-  assert(CG_Result_Status == CG_RESULT_OK);
+-  assert(Get_CG_Value(100,105)==0.0f);
+-  assert(CG_Result_Status == CG_RESULT_TEMP_ERROR);
+-
+-  /* All 65536 AD codes are swept in normal, reversed, and equal-zero cases.
+-   * Include large zero gaps, signed endpoints, and minimum allowed spans. */
+-  check_zero_edges(1,50,-12445,12513);
+-  check_zero_edges(50,1,-12445,12513);
+-  check_zero_edges(50,50,-12445,12513);
+-  check_zero_edges(750,-750,-3250,3250);
+-  check_zero_edges(-750,750,-4750,4750);
+-  check_zero_edges(28000,27000,24000,32000);
+-  check_zero_edges(-28000,-27000,-32768,-23000);
+-  puts("CG35 zero edges: PASS; full 16-bit sweeps, both zero orders, endpoints, direction, temperature");
+-  puts("CG math: PASS; startup/invalid spans, unbounded numeric output, endpoints, temp reference");
+-  return 0;
+-}
+-''')
++    (d / 'test_math.c').write_text(
++        (root / 'tests/CG40_HOST_TESTS/test_math.c').read_text(encoding='utf-8'),
++        encoding='utf-8')
+     func = extract_c_function(key, 'void CG_Calibration_Storage(void)')
+     (d / 'test_key.c').write_text(r'''
+ #include <stdio.h>
+@@ -331,11 +227,13 @@ int main(void) {
+ """,encoding='utf-8')
+ 
+     for source, out, more in [('test_math.c','test_math',['Algorithm_code.c','-lm']), ('test_key.c','test_key',[]), ('test_display.c','test_display',[])]:
+-        cmd=['cc','-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
+-             '-fsanitize=undefined','-fno-omit-frame-pointer','-I',str(d),str(d/source)]
++        cmd=[os.environ.get('CC','cc'),'-std=c99','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
++             '-fno-omit-frame-pointer','-I',str(d),str(d/source)]
++        if os.environ.get('HOST_SANITIZERS','1')!='0':
++            cmd += ['-fsanitize=undefined']
+         for v in more:
+             cmd.append(str(d/v) if v.endswith('.c') else v)
+         cmd += ['-o',str(d/out)]
+-        subprocess.run(cmd,check=True,capture_output=True,text=True)
++        subprocess.run(cmd,check=True)
+         subprocess.run([str(d/out)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
+ print('CG integration static checks: PASS; EEPROM production switches unchanged')
+diff --git "a/V1.0.4_B31_CG33/\345\217\230\346\233\264\346\227\245\345\277\227.md" "b/V1.0.4_B31_CG33/\345\217\230\346\233\264\346\227\245\345\277\227.md"
+index 8cf09ec..733b734 100644
+--- "a/V1.0.4_B31_CG33/\345\217\230\346\233\264\346\227\245\345\277\227.md"
++++ "b/V1.0.4_B31_CG33/\345\217\230\346\233\264\346\227\245\345\277\227.md"
+@@ -1,9 +1,10 @@
+ # 数显轨距尺变更日志
+ 
+-当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG39 TEST / 2026-11-24** 主控测试版，配套 CG34 倾角板。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
++当前目录为 **V1.0.4_B31_CG33**，本次源码包含 **CG40 TEST / 2026-11-28** 主控及倾角板基线修复测试版。各版本的发布说明、详细变更、文件清单和验证记录按版本归在下方。历史记录沿用发布时的文件名及测试入口，当前入口见本节。
+ 
+ | 版本 | 主要变更 | 原始补丁 |
+ | --- | --- | --- |
++| [CG40 TEST](#cg40-test) | 超高唯一中点零位、同朝向跨度斜率、正零及测温延时加固 | [CG40 增量差异](docs/patches/CG40_20261128_超高基线修复.patch) |
+ | [CG39 TEST](#cg39-test) | 两测量页统一电量；时间越界、字符残留、日期和 RTC 校验修复 | [CG39 增量差异](docs/patches/CG39_20261124_电量与时间设置修复.patch) |
+ | [CG38 TEST](#cg38-test) | 查护实时换算，共用轨距滤波，独立基准、稳定采集和可靠保存 | [CG38 增量差异](docs/patches/CG38_20261123_查照护背优化.patch) |
+ | [CG37 TEST](#cg37-test) | 标定页面恢复实时 AD，并显示已采集均值 | [CG37 增量差异](docs/patches/CG37_20261123_标定实时AD显示.patch) |
+@@ -22,12 +23,24 @@
+ 
+ - Keil 工程为 [STM32L151 主控](STM32L151/MDK-ARM/STM32L151.uvprojx)和 [QINGJIAOBAN 倾角板](QINGJIAOBAN/PROJECT/GuiJuChi.uvprojx)。
+ - [B31 EEPROM 量产与实机验收](docs/guides/B31_20261104_量产操作说明.md)、[CG32 双板 Keil 验证](docs/guides/CG32_20261116_Keil实机验证指南.md)和 [B3 EEPROM 备份与迁移历史指南](docs/guides/B3_20261103_EEPROM备份与迁移操作指南.md)。
+-- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用当前超高专项、CG38 查护专项、CG39 电量/时间专项、采样调度、B31 EEPROM 与 B2 双板串口用例。
++- 在工程根目录用 POSIX shell、GCC（含 UBSan）和 Python 3 运行主机测试。CG32 入口同时调用当前 CG40 超高/测温专项、CG38 查护专项、CG39 电量/时间专项、采样调度、B31 EEPROM 与 B2 双板串口用例。
+ 
+ ```sh
+ sh tests/CG32_HOST_TESTS/run_cg32_tests.sh
+ ```
+ 
++## CG40 TEST
++
++2026-11-28。按用户要求修复超高软件基线：取消两个水平 AD 之间的强制零区间，用两者浮点算术平均作为唯一绝对零点，保留半个 AD；两侧斜率分别由同朝向的 180 mm 与水平 AD 差计算，不再按零点大小排序后跨朝向取差。两侧以中点为共同起点连续解算，先减零点再乘斜率。0.05 mm 化整和方向乘数之后将 IEEE 负零归一化为正零。
++
++倾角板 LM95071 软件延时改用 volatile 剩余计数与 CMSIS NOP，避免空循环在优化后失去延时语义。实际 ARMCC O0/O2/O3 和正式目标文件反汇编确认保留循环及 NOP；原空循环在本机 ARMCC O3 仍存在，因此不据此认定硬件温度跳变原因已确认。
++
++EEPROM 格式与参数、串口协议、按键标定流程、稳定采集与异常保护、角度滤波及采样/发包参数均未改。原温补公式保留。1003 个固件源码/头文件/汇编/工程配置比对，仅两个修复源文件及 App_code.c 的 CG40 启动版本行变化，其余 1000 个文件逐字节不变；保留用户原有 .uvguix 改动。
++
++超高专项 3678403 项（8 组全 AD 扫描）和测温驱动每档优化 1559563 项通过，既有滤波、ADC、采样、EEPROM、双板串口、查护、电量/时间回归全部通过。两块板 Keil 全量编译均为零错误、零警告。本机 Windows GCC 功能回归显式禁用缺失的 UBSan，硬件未烧录，精度与两秒响应待检定台实测。
++
++配套固件位于 `firmware/CG40_TEST_20261128/`，主控开机显示 CG40 TEST。两个水平/180 mm 采集姿态可能保留台面残余倾斜，不再分别强制映射到 0/±180；温度偏离标定温度时原温补仍会影响最终示值。公式、兼容范围、实测步骤与调试变量见 [CG40 超高基线修复测试说明](docs/guides/CG40_20261128_超高基线修复测试说明.md)。
++
+ ## CG39 TEST
+ 
+ 2026-11-24。修复查护页固定满电图标，与轨距/超高页共用电量缓存、刷新和低电量闪烁。第一次测量立即采样，切页立即重绘；电压采样固定 5 秒，闪烁 500 ms，沿用原电量平均和电压分档。
+--- /dev/null
++++ b/V1.0.4_B31_CG33/tests/CG40_HOST_TESTS/test_math.c
+@@ -0,0 +1,209 @@
++/* CG40: execute the real Algorithm_code.c against an independent model. */
++#include <stdio.h>
++#include <stdlib.h>
++#include <math.h>
++#include <string.h>
++#include "Algorithm_head.h"
++
++extern float CG_Value_t, TempOffset;
++static unsigned checks;
++#define CHECK(x) do { ++checks; if (!(x)) { \
++    fprintf(stderr,"CG40 check failed at line %d: %s\n",__LINE__,#x); \
++    abort(); } } while (0)
++
++CG_Calibration_Param_Str CG_Param = {1,-12445,50,12513,20};
++GJ_Calibration_Param_Str GJ_Param = {7781,15946,27395,20};
++CH_Calibration_Param_Str CH_Param = {10318,10318,20};
++int8_t left_And_Righe_Status = 1;
++float POWER_Vol = 3.3f, GJ_Value = 0;
++float ADC_GetVrefintVoltage(void) { return 3.3f; }
++
++static double reference_raw(int16_t ad)
++{
++    double middle = ((double)CG_Param.CG_Zero_Left_Ad +
++                     (double)CG_Param.CG_Zero_Right_Ad) / 2.0;
++    double span;
++    if ((double)ad < middle) {
++        span = (double)CG_Param.CG_Zero_Left_Ad - CG_Param.CG_Max_Left_Ad;
++        return (middle - ad) * 180.0 / span;
++    }
++    span = (double)CG_Param.CG_Max_Right_Ad - CG_Param.CG_Zero_Right_Ad;
++    return -(ad - middle) * 180.0 / span;
++}
++
++static void check_case(int16_t zl, int16_t zr, int16_t al, int16_t ar)
++{
++    int32_t ad;
++    double mid = ((double)zl + zr) / 2.0;
++    double left_step = 180.0 / ((double)zl - al);
++    double right_step = 180.0 / ((double)ar - zr);
++    double max_step = fmax(left_step, right_step);
++    float previous = 0.0f;
++    float output, normal;
++    CG_Param = (CG_Calibration_Param_Str){zl,al,zr,ar,23.0f};
++    left_And_Righe_Status = 1;
++    CG_Data_Init();
++    CHECK(CG_Result_Status == CG_RESULT_OK);
++    for (ad=INT16_MIN; ad<=INT16_MAX; ++ad) {
++        double expected = reference_raw((int16_t)ad);
++        output = Get_CG_Value((int16_t)ad,23);
++        CHECK(CG_Result_Status == CG_RESULT_OK);
++        CHECK(fabs((double)CG_Value_t - expected) < 0.002);
++        CHECK(fabs((double)output - expected) <= 0.026);
++        CHECK(fabsf(output/0.05f - roundf(output/0.05f)) < 0.01f);
++        CHECK(output != 0.0f || !signbit(output));
++        if (ad > INT16_MIN) {
++            CHECK(CG_Value_t <= previous);
++            CHECK((double)previous-CG_Value_t <= max_step+0.002);
++        }
++        previous = CG_Value_t;
++    }
++
++    /* Distinct horizontal captures are measurements, not a zero plateau. */
++    Get_CG_Value(zl,23);
++    CHECK(fabs((double)CG_Value_t-reference_raw(zl)) < 0.002);
++    if (zl != zr) CHECK(CG_Value_t != 0.0f);
++    Get_CG_Value(zr,23);
++    CHECK(fabs((double)CG_Value_t-reference_raw(zr)) < 0.002);
++    if (zl != zr) CHECK(CG_Value_t != 0.0f);
++    if (floor(mid) == mid) {
++        CHECK(Get_CG_Value((int16_t)mid,23) == 0.0f);
++        CHECK(CG_Value_t == 0.0f);
++    } else {
++        Get_CG_Value((int16_t)floor(mid),23); CHECK(CG_Value_t > 0.0f);
++        Get_CG_Value((int16_t)ceil(mid),23); CHECK(CG_Value_t < 0.0f);
++    }
++
++    /* A stored endpoint includes the bench's residual tilt. The 180 mm
++     * increment is measured from its SAME-orientation zero, not from mid. */
++    Get_CG_Value(al,23);
++    CHECK(fabs(CG_Value_t - (180.0 + (mid-zl)*left_step)) < 0.002);
++    Get_CG_Value(ar,23);
++    CHECK(fabs(CG_Value_t - (-180.0 + (mid-zr)*right_step)) < 0.002);
++    if (mid+(double)al-zl >= INT16_MIN && floor(mid)==mid) {
++        CHECK(fabsf(Get_CG_Value((int16_t)(mid+al-zl),23)-180.0f)<0.001f);
++    }
++    if (mid+(double)ar-zr <= INT16_MAX && floor(mid)==mid) {
++        CHECK(fabsf(Get_CG_Value((int16_t)(mid+ar-zr),23)+180.0f)<0.001f);
++    }
++
++    /* Direction and the existing temperature term remain post-processing. */
++    for (ad=INT16_MIN; ad<=INT16_MAX; ad+=257) {
++        normal=Get_CG_Value((int16_t)ad,23);
++        left_And_Righe_Status=-1;
++        output=Get_CG_Value((int16_t)ad,23);
++        CHECK(output == -normal);
++        CHECK(output != 0.0f || !signbit(output));
++        left_And_Righe_Status=1;
++        output=Get_CG_Value((int16_t)ad,25);
++        CHECK(fabsf(TempOffset - (-0.054637f*2.0f)) < 0.000001f);
++        CHECK(fabs((double)output-(reference_raw((int16_t)ad)+0.109274))<=0.026);
++    }
++}
++
++static void check_bench_residual(void)
++{
++    const int16_t residuals[] = {-700,-115,0,115,700};
++    const int16_t heights[] = {-180,-150,-100,-50,0,50,100,150,180};
++    unsigned i,j;
++    for (i=0;i<sizeof(residuals)/sizeof(residuals[0]);++i) {
++        int16_t r=residuals[i];
++        /* Synthetic linear sensor: absolute zero=1000, -100 AD/mm.
++         * Reversing the bench inclination changes the residual sign. */
++        CG_Param=(CG_Calibration_Param_Str){(int16_t)(1000+r),
++            (int16_t)(1000+r-18000),(int16_t)(1000-r),
++            (int16_t)(1000-r+18000),25};
++        CG_Data_Init(); CHECK(CG_Result_Status==CG_RESULT_OK);
++        for (j=0;j<sizeof(heights)/sizeof(heights[0]);++j) {
++            float h=(float)heights[j];
++            CHECK(fabsf(Get_CG_Value((int16_t)(1000-100*heights[j]),25)-h)<0.001f);
++        }
++    }
++    /* Regression: r=115 gives 49.50 mm with CG35's cross-orientation
++     * edge/slope; the same synthetic absolute input must now be 50.00. */
++    CG_Param=(CG_Calibration_Param_Str){115,-17885,-115,17885,25};
++    CG_Data_Init(); CHECK(Get_CG_Value(-5000,25)==50.0f);
++}
++
++static void check_invalid(void)
++{
++    const CG_Calibration_Param_Str bad[] = {
++        {0,0,0,10000,20}, {0,-3999,0,10000,20},
++        {0,10000,0,10000,20}, {0,-10000,0,3999,20},
++        {0,-10000,0,-10000,20}, {751,-10000,-750,10000,20},
++        {0,-10000,0,10000,-40.01f}, {0,-10000,0,10000,100.01f},
++        {0,-10000,0,10000,NAN}, {0,-10000,0,10000,INFINITY}
++    };
++    const float bad_t[] = {-40.01f,100.01f,NAN,INFINITY,-INFINITY};
++    unsigned i;
++    for (i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
++        CG_Param=bad[i]; CG_Data_Init();
++        CHECK(CG_Result_Status==CG_RESULT_CAL_ERROR);
++        CHECK(Get_CG_Value(-5000,20)==0.0f);
++        CHECK(CG_Result_Status==CG_RESULT_CAL_ERROR);
++    }
++    CG_Param=(CG_Calibration_Param_Str){0,-10000,0,10000,20};
++    CG_Data_Init();
++    for (i=0;i<sizeof(bad_t)/sizeof(bad_t[0]);++i) {
++        CHECK(Get_CG_Value(0,bad_t[i])==0.0f);
++        CHECK(CG_Result_Status==CG_RESULT_TEMP_ERROR);
++    }
++    Get_CG_Value(0,-40); CHECK(CG_Result_Status==CG_RESULT_OK);
++    Get_CG_Value(0,100); CHECK(CG_Result_Status==CG_RESULT_OK);
++    CG_Param.CG_Max_Left_Ad=1; /* Runtime integrity check remains active. */
++    CHECK(Get_CG_Value(-5000,20)==0.0f);
++    CHECK(CG_Result_Status==CG_RESULT_CAL_ERROR);
++    CG_Param=(CG_Calibration_Param_Str){0,-10000,0,10000,20};
++    CG_Data_Init();
++    CHECK(Get_CG_Value(INT16_MIN,20)>400.0f);
++    CHECK(CG_Result_Status==CG_RESULT_OK);
++    CHECK(Get_CG_Value(INT16_MAX,20)<-400.0f);
++    CHECK(CG_Result_Status==CG_RESULT_OK);
++}
++
++static void check_rounding_and_signed_zero(void)
++{
++    int ad, direction;
++    char text[32];
++    /* Exactly one display step per two counts; +/-half rounds away from 0. */
++    CG_Param=(CG_Calibration_Param_Str){0,-7200,0,7200,20};
++    CG_Data_Init();
++    CHECK(Get_CG_Value(-1,20)==0.05f);
++    CHECK(Get_CG_Value(1,20)==-0.05f);
++    /* Check tiny positive/negative results and exact 0 in both directions. */
++    CG_Param=(CG_Calibration_Param_Str){0,-18000,0,18000,20};
++    CG_Data_Init();
++    for (direction=-1;direction<=1;direction+=2) {
++        left_And_Righe_Status=(int8_t)direction;
++        for (ad=-2;ad<=2;++ad) {
++            float result=Get_CG_Value((int16_t)ad,20);
++            CHECK(result==0.0f && !signbit(result));
++            snprintf(text,sizeof(text),"%+07.2f",result);
++            CHECK(strcmp(text,"+000.00")==0);
++        }
++        CHECK(Get_CG_Value(-3,20)==0.05f*direction);
++        CHECK(Get_CG_Value(3,20)==-0.05f*direction);
++        CHECK(Get_CG_Value(0,20.1f)==0.0f && !signbit(Get_CG_Value(0,20.1f)));
++        CHECK(Get_CG_Value(0,19.9f)==0.0f && !signbit(Get_CG_Value(0,19.9f)));
++    }
++    left_And_Righe_Status=1;
++}
++
++int main(void)
++{
++    CHECK(Get_CG_Value(-12445,20)==0.0f);
++    CHECK(CG_Result_Status==CG_RESULT_CAL_ERROR);
++    check_case(1,50,-12445,12513);
++    check_case(50,1,-12445,12513);
++    check_case(50,50,-12445,12513);
++    check_case(750,-750,-3250,3250);
++    check_case(-750,750,-4750,4750);
++    check_case(28000,27000,24000,32000);
++    check_case(-28000,-27000,-32768,-23000);
++    check_case(-51,-2,-12445,12513); /* Negative half-count midpoint. */
++    check_bench_residual();
++    check_invalid();
++    check_rounding_and_signed_zero();
++    printf("CG40 math: PASS %u checks; 8 full signed-AD sweeps, midpoint, same-orientation spans, residual tilt, guards, temperature, 0.05 mm and +0.00\n",checks);
++    return 0;
++}
+--- /dev/null
++++ b/V1.0.4_B31_CG33/tests/CG40_HOST_TESTS/test_temperature.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""Compile the actual LM95071 driver with GPIO mocks at O0/O2/O3."""
++from pathlib import Path
++import os
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[2]
++source = (root / 'QINGJIAOBAN/CLASS/SCR/lm9507_code.c').read_bytes().decode('gb18030')
++header = r'''
++#include <stdint.h>
++typedef struct GPIO_STR GPIO_STR;
++struct GPIO_STR {
++    void (*str_init)(GPIO_STR *);
++    void (*write)(GPIO_STR *, uint8_t);
++    uint8_t (*read)(GPIO_STR *);
++};
++typedef struct LM9507_CLASS_STR LM9507_STR;
++struct LM9507_CLASS_STR {
++    GPIO_STR *clk, *cs, *mosi, *miso;
++    void (*init)(LM9507_STR *);
++    void (*write)(LM9507_STR *,uint16_t);
++    uint16_t (*read)(LM9507_STR *);
++    float (*readTemp)(LM9507_STR *);
++    void (*shoutDown)(LM9507_STR *);
++    void (*str_init)(LM9507_STR *);
++};
++#define Bit_SET 1U
++#define Bit_RESET 0U
++void host_nop(void);
++#define __NOP() host_nop()
++void LM9507_DELAY(uint32_t time);
++void LM9507_STR_INIT(LM9507_STR *);
++'''
++test = r'''
++#include <stdio.h>
++#include <stdlib.h>
++#include <math.h>
++#include "lm9507_head.h"
++static unsigned checks,nops,initializations;
++static unsigned cs_low,cs_high,rises,falls,reads,writes;
++static uint8_t cs=1,clock_level;
++static uint16_t incoming,outgoing;
++#define CHECK(x) do { ++checks; if (!(x)) { \
++    fprintf(stderr,"LM95071 failure at line %d: %s\n",__LINE__,#x); abort(); \
++} } while (0)
++void host_nop(void) { ++nops; }
++static void pin_init(GPIO_STR *pin) { (void)pin; ++initializations; }
++static void clock_write(GPIO_STR *pin,uint8_t value) {
++    (void)pin;
++    CHECK(cs==0);
++    if (value) { CHECK(clock_level==0); ++rises; }
++    else { CHECK(clock_level==1); ++falls; }
++    clock_level=value;
++}
++static void cs_write(GPIO_STR *pin,uint8_t value) {
++    (void)pin;
++    CHECK(value!=cs);
++    cs=value;
++    if (value) ++cs_high; else ++cs_low;
++}
++static void data_write(GPIO_STR *pin,uint8_t value) {
++    (void)pin; CHECK(cs==0 && clock_level==0);
++    outgoing=(uint16_t)((outgoing<<1)|value); ++writes;
++}
++static uint8_t data_read(GPIO_STR *pin) {
++    uint8_t value;
++    (void)pin; CHECK(cs==0 && clock_level==1 && reads<16);
++    value=(uint8_t)((incoming>>(15U-reads))&1U); ++reads;
++    return value;
++}
++static GPIO_STR clk_pin={pin_init,clock_write,0};
++static GPIO_STR cs_pin={pin_init,cs_write,0};
++static GPIO_STR mosi_pin={pin_init,data_write,0};
++static GPIO_STR miso_pin={pin_init,0,data_read};
++static LM9507_STR sensor={&clk_pin,&cs_pin,&mosi_pin,&miso_pin,0,0,0,0,0,LM9507_STR_INIT};
++static void reset_transaction(void) {
++    CHECK(cs==1 && clock_level==0);
++    cs_low=cs_high=rises=falls=reads=writes=nops=0; outgoing=0;
++}
++int main(void) {
++    const uint32_t delays[]={0,1,10,10003};
++    unsigned i,tail;
++    int count;
++    for (i=0;i<sizeof(delays)/sizeof(delays[0]);++i) {
++        nops=0; LM9507_DELAY(delays[i]); CHECK(nops==delays[i]);
++    }
++    sensor.str_init(&sensor); CHECK(initializations==4);
++    CHECK(sensor.init && sensor.write && sensor.read && sensor.readTemp && sensor.shoutDown);
++    for (count=-1280;count<=3200;++count) for (tail=0;tail<4;++tail) {
++        float result;
++        reset_transaction();
++        incoming=(uint16_t)((uint16_t)(count*4)|tail);
++        result=sensor.readTemp(&sensor);
++        CHECK(fabsf(result-count*0.03125f)<0.000001f);
++        CHECK(cs_low==1 && cs_high==1 && cs==1);
++        CHECK(rises==16 && falls==16 && reads==16 && writes==0);
++        CHECK(nops==160);
++    }
++    reset_transaction();
++    cs_pin.write(&cs_pin,0); sensor.write(&sensor,0xA55A); cs_pin.write(&cs_pin,1);
++    CHECK(outgoing==0xA55A && writes==16 && reads==0);
++    CHECK(rises==16 && falls==16 && nops==320);
++    reset_transaction(); sensor.shoutDown(&sensor);
++    CHECK(cs_low==1 && cs_high==1 && outgoing==0x00FF && writes==16 && nops==320);
++    printf("CG40 LM95071: PASS %u checks; delay count, 17924 signed temperatures/tails, CS/clock/data order and write/shutdown\n",checks);
++    return 0;
++}
++'''
++with tempfile.TemporaryDirectory(prefix='cg40_temperature_') as temp:
++    d = Path(temp)
++    (d / 'lm9507_head.h').write_text(header, encoding='utf-8')
++    (d / 'lm9507_code.c').write_text(source, encoding='utf-8')
++    (d / 'test.c').write_text(test, encoding='utf-8')
++    for level in ['-O0', '-O2', '-O3']:
++        exe=d/('test'+('.exe' if os.name=='nt' else ''))
++        cmd=[os.environ.get('CC','cc'),'-std=c99',level,'-Wall','-Wextra','-Werror',
++             '-fstack-protector-all','-fno-omit-frame-pointer','-I',str(d)]
++        if os.environ.get('HOST_SANITIZERS','1')!='0': cmd+=['-fsanitize=undefined']
++        subprocess.run(cmd+[str(d/'lm9507_code.c'),str(d/'test.c'),'-o',str(exe)],check=True)
++        print('Compiler optimization: '+level,flush=True)
++        subprocess.run([str(exe)],check=True,env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'})
+--- /dev/null
++++ b/V1.0.4_B31_CG33/docs/guides/CG40_20261128_超高基线修复测试说明.md
+@@ -0,0 +1,83 @@
++# CG40 TEST 超高基线修复
++
++2026-11-28。基于 `15c9cd7` / CG39 TEST 主控和 CG34 倾角板，在原项目目录直接修改。用于上检定台排查真实误差，尚未执行硬件烧录或精度验收。
++
++## 固件与范围
++
++- 主控：`firmware/CG40_TEST_20261128/STM32L151_CG40_TEST.hex`，启动标识 CG40 TEST。
++- 倾角板：`firmware/CG40_TEST_20261128/STM32F103_CG40_TEST.hex`，包含测温延时加固。
++- 要同时获得两项修复，应更新两块板。串口协议兼容已有版本。
++- EEPROM 数据结构、地址、A/B 双副本、CRC、标定字段和既有数据不变。正常升级可读取已有四点数据，不会主动重写 EEPROM；重新标定是为本次检定建立受控基线，并非存储格式迁移要求。
++- 标定界面/按键顺序、采集判稳、异常保护、采样周期、40 点角度滤波、2 AD 输出门槛和 100 ms 上报均保持原值。
++- 原超高温补系数及公式保留；本版不建立新的温补模型。轨距、查照和护背解算保持原样。
++
++## 四点对应和新公式
++
++| 采集顺序 | 原界面 | 已有字段 | 对应关系 |
++| --- | --- | --- | --- |
++| 1 | 水平处 | `CG_Zero_Left_Ad`，记作 ZL | 初始朝向水平 |
++| 2 | 水平处掉头 | `CG_Zero_Right_Ad`，记作 ZR | 掉头朝向水平 |
++| 3 | 180mm | `CG_Max_Left_Ad`，记作 AL | 与第 1 点同朝向 |
++| 4 | 180mm 掉头 | `CG_Max_Right_Ad`，记作 AR | 与第 2 点同朝向 |
++
++唯一绝对零点取算术平均：`Z0 = (float(ZL) + float(ZR)) / 2`。先转 float 再求和，避免 16 位加法溢出，并保留半个 AD。
++
++两侧斜率分别为 `KL = 180 / (AL - ZL)`、`KR = -180 / (AR - ZR)`。分母始终使用同朝向的 180 mm 与 0 mm 差，避免按水平 AD 大小排序后跨朝向取差。原校验已保证这两个有向跨度至少 4000 AD，零点差绝对值不超过 1500 AD。
++
++温补前结果：
++
++```text
++A < Z0：H0 = (A - Z0) * KL
++A >= Z0：H0 = (A - Z0) * KR
++```
++
++两侧连续通过 Z0，不再把 ZL～ZR 整段压成零。采用先减零点、再乘斜率的写法，避免 K*A 与大截距相减带来的数值抵消。
++
++温补和显示仍为：
++
++```text
++TempOffset = -0.054637 * (Temp - CG_Param.temp)
++H = roundf((H0 - TempOffset) / 0.05) * 0.05 * direction
++H == 0 时重新赋 +0.0，随后原 OLED 格式显示 +000.00
++```
++
++负零归一化放在化整和方向乘数之后，覆盖小负值四舍五入、反方向乘法产生的 -0；不会把非零负超高改成正数。
++
++## 检定台残余倾斜应如何理解
++
++同朝向作差在原线性模型下抵消两次采集共同的检定台残余倾斜，前提是标定期间台面基线、接触状态和温度稳定、每次朝向正确。机械回差、非线性、温漂或台面改变仍需实测排查。
++
++**两个水平采集姿态不再必然各显示 0，保存的两个 180 mm 采集姿态也不再被强制各显示 ±180。** 它们可能保留检定台残余倾斜；唯一零点是中值。比较时应使用检定器该姿态的实际参考超高，不能为了让屏幕归零而修改新斜率或扩大死区。
++
++举一个纯数学回归例子：ZL=115、ZR=-115、AL=-17885、AR=17885、温度与标定温度一致。真实输入 A=-5000，对应 50 mm。原 CG35 的跨朝向边界/斜率算法得到约 49.48 mm，化整为 49.50；本版得到 50.00。此为构造的线性传感器用例，不代表已经确认本机 50→49.50 的唯一原因。
++
++在 A=Z0 时只有 H0 保证为零；温度不同于保存的标定温度时，原温补仍可能产生非零最终示值。上台应同时记录温补前结果和温度，区分这两种影响。
++
++## 测温延时
++
++`QINGJIAOBAN/CLASS/SCR/lm9507_code.c` 的空循环替换成 volatile 剩余计数和每轮 CMSIS `__NOP()`。参数仍表示循环次数，不是微秒。既有调用位置、调用值 10、CS/SCK 数据顺序、温度符号扩展和 0.03125℃ 换算均未改变。
++
++ARMCC 实际 O0/O2/O3 反汇编都确认循环、计数器写入和 NOP 保留；正式工程目标文件也核对了实际指令。原空循环在本机 ARMCC 的 O3 单独编译中仍保留，因此本次属于防优化加固，不能据此认定原温度偶发跳变已经在实机复现或完全解决。绝对时序需用示波器/逻辑分析仪实测。
++
++## 本次软件验证
++
++- 超高真实 C 算法共 3678403 项检查通过：8 组全范围 -32768～32767 AD 扫描；正序/反序/相同水平 AD；正、负半 AD 中点；大幅正负零点；最小跨度与最大零点差；不同两侧斜率；单调、连续；构造台面残差抵消；现有温补、方向、0.05 mm 半步化整及正零格式。
++- 原非法标定/温度保护、上电未初始化、标定采集与 EEPROM 保存失败重试、实时 AD 和等待原因显示回归通过。
++- 测温真实驱动以 GPIO 模拟在主机 O0/O2/O3 下各通过 1559563 项检查，覆盖 -40～100℃ 的全部 1/32℃ 码及末两位组合（17924 组）、延时 0/1/10/10003、16 位时钟和读写顺序、初始化和关断。
++- 原角度滤波 202 项、ADC161、采样调度、B31 EEPROM 357 项、串口/判稳 91 项、CG38 查护 98484 项、CG39 电量/时间 112643 项、倾角板 ACK/100 ms 调度全部通过。
++- 两块板 Keil 全量编译均为 0 Error(s), 0 Warning(s)。主控 Code=35812、RO=4248、RW=940、ZI=4932；倾角板 Code=6100、RO=284、RW=744、ZI=1424。
++- 本机 Windows GCC 15.1 缺少 libubsan，本次显式使用 `HOST_SANITIZERS=0` 功能回归；原 POSIX 统一入口保留 UBSan 默认，不宣称已执行动态未定义行为检测。
++- 对 1003 个原固件源码/头文件/汇编/工程配置做哈希比对：仅 Algorithm_code.c、lm9507_code.c 和 App_code.c 的启动版本行变化，其余 1000 个文件逐字节不变。原有用户 .uvguix 改动保留。全量编译产生的目标文件、map、hex 和 Keil 日志正常更新。
++
++测试入口仍为 `sh tests/CG32_HOST_TESTS/run_cg32_tests.sh`，新增 `tests/CG40_HOST_TESTS/test_temperature.py`；原 `tests/CG_FIX_HOST_TESTS/test_cg.py` 保留按键/显示检查，数学预期改由 `tests/CG40_HOST_TESTS/test_math.c` 提供，移除已废弃零区间与强制满量程端点的旧预期。
++
++## 上台实测顺序
++
++1. 记录现有四点 AD 与标定温度，烧录本版两份 HEX，确认主控 CG40 TEST。
++2. 尺子与检定器充分达到稳定温度和接触状态后，仍按原流程采集水平、水平掉头、180 mm、180 mm 掉头并最终保存。不要为了抹平残余倾斜，在各点之间另行改变检定台基线。
++3. 在 0、±50、±100、±150、±180 mm 及可实现的近零小超高处进行测量。每点重复放置至少 3 次，再反向走一轮。以检定器实际参考值计算误差。
++4. 通过 Keil Watch 记录 `CG_Param`、`CG_Ad`、`CG_Zero_Mid_Ad`、`K_CG_Left`、`K_CG_Right`、`Temp`、`CG_Value_t`、`TempOffset`、`CG_Value` 和 `CG_Result_Status`。当前显示页不新增温度显示，串口不新增字段。
++5. 若 50 mm 仍不准，先比较 H0 与最终值：H0 准而最终值不准，检查保留的温补；H0 稳定偏差，检查传感器/机械曲线；重放或往返差大，检查接触及回差。不要仅用单点倍率修正整个量程。
++6. 从一个高度切换到另一高度，记录进入规定误差范围并稳定所需的时间。本次滤波参数未变，两秒要求与最终精度仍以实机结果验收。
++
++发布目录附两份 HEX、主机与 Keil 日志、延时反汇编、源码校验和 SHA256SUMS。增量补丁为 `docs/patches/CG40_20261128_超高基线修复.patch`。
