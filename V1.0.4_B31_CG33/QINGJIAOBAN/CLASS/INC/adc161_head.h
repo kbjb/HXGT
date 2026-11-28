@@ -13,7 +13,7 @@ typedef struct ADC161_CLASS_STR
     int16_t    ad_data;
     void (*str_init)(struct ADC161_CLASS_STR*);
     void (*init)(struct ADC161_CLASS_STR*);
-    void (*read)(struct ADC161_CLASS_STR*);
+    uint8_t (*read)(struct ADC161_CLASS_STR*);
 }ADC161_STR;
 
 

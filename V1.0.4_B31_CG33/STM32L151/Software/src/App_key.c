@@ -1,4 +1,5 @@
 #include "App_key.h"
+#include "usart_head.h"
 #include "pcf8563_head.h"
 #include "key_head.h"
 #include "App_Eep.h"
@@ -217,9 +218,10 @@ void Change_Percision_Set_Select_Id(void)
 /*确认键相关功能*/
 void Change_Menu_Page_For_Menu_Id(void)
 {
-    PAGE_ID Goal_Page = (PAGE_ID)(menu_Id_Select+page_time);
-    if(Goal_Page>=page_time && Goal_Page< page_cg_calibration)
-        set_PageId(Goal_Page);
+    if (menu_Id_Select == MENU_ID_NUMBER-1U)
+        Bluetooth_Toggle();
+    else if (menu_Id_Select < MENU_ID_NUMBER-1U)
+        set_PageId((PAGE_ID)(menu_Id_Select + page_time));
 }
 void Change_Goal(void)
 {

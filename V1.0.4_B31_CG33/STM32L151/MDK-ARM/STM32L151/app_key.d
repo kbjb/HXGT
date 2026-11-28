@@ -36,6 +36,8 @@ stm32l151\app_key.o: ../Drivers/STM32L1xx_HAL_Driver/Inc/stm32l1xx_hal_exti.h
 stm32l151\app_key.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\string.h
 stm32l151\app_key.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\stdio.h
 stm32l151\app_key.o: ../Software/inc/param_head.h
+stm32l151\app_key.o: ../Software/inc/usart_head.h
+stm32l151\app_key.o: ../Software/inc/agreement_head.h
 stm32l151\app_key.o: ../Software/inc/pcf8563_head.h
 stm32l151\app_key.o: ../Software/inc/key_head.h
 stm32l151\app_key.o: ../Software/inc/App_oled.h
@@ -46,4 +48,3 @@ stm32l151\app_key.o: ../Software/inc/App_Eep.h
 stm32l151\app_key.o: ../Software/inc/Algorithm_head.h
 stm32l151\app_key.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\math.h
 stm32l151\app_key.o: ../Software/inc/cg_cal_guard.h
-stm32l151\app_key.o: ../Software/inc/agreement_head.h

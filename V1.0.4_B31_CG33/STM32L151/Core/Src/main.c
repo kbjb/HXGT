@@ -123,6 +123,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_ADC_Init();
+  __HAL_RCC_ADC1_CLK_DISABLE();
   MX_I2C1_Init();
   MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
@@ -150,13 +151,18 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+      uint32_t loop_tick = HAL_GetTick();
+      static uint8_t was_on;
+      uint8_t powered;
       /* [B2] Process complete UART packets in foreground. Never parse or TX in ISR. */
       UART_Process_Received(UART1_ID);
-      UART_Process_Received(UART2_ID);
+      if (!Bluetooth_Busy())
+          UART_Process_Received(UART2_ID);
+      Bluetooth_Service();
       Agreement_Ack_For_Fun();//轨距尺上位机协议处理
       
       
-      if(U2_PC_Work_Mode == 1)
+      if (U2_PC_Work_Mode == 1 && !Bluetooth_Busy())
       {
           U2_Cycle_Send_Mode_Time_Current = HAL_GetTick();
           if((U2_Cycle_Send_Mode_Time_Current-U2_Cycle_Send_Mode_Time_History) >= 1000)
@@ -180,12 +186,31 @@ int main(void)
       Change_Key_Check_Scn();
       Parser_Key_Check_Scn();
       /*界面刷新*/
-      if(Get_Power_Status())
+      powered = Get_Power_Status();
+      if (powered && !was_on)
+      {
+          Measurement_Power_Session();
+          Bluetooth_Startup();
+      }
+      if (!powered && was_on) ADC_Battery_Cancel();
+      was_on = powered;
+      if (powered)
+      {
+          Measurement_Battery_Service();
           oled_Reflash();
-      else
-        Page_init();
-      /*蜂鸣器响应*/
+          OLED_Refresh();
+      }
       Beep_Reflash();
+
+      /* Shallow Sleep retains peripheral clocks and the 1 ms tick. */
+      __disable_irq();
+      if (HAL_GetTick() == loop_tick && !UART_Is_Frame_Ready(UART1_ID) &&
+          (Bluetooth_Busy() || !UART_Is_Frame_Ready(UART2_ID)))
+      {
+          __DSB();
+          __WFI();
+      }
+      __enable_irq();
   }
     /* USER CODE END WHILE */
 
@@ -211,12 +236,9 @@ void SystemClock_Config(void)
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSIState = RCC_HSI_OFF;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL12;
-  RCC_OscInitStruct.PLL.PLLDIV = RCC_PLL_DIV4;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_OFF;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -226,15 +248,16 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }
+  __HAL_RCC_MSI_DISABLE();
 }
 
 /**
@@ -281,7 +304,7 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_9;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_4CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_384CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -383,7 +406,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;

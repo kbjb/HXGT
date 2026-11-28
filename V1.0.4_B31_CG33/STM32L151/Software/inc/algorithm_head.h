@@ -27,7 +27,6 @@ uint8_t GJ_Get_Valid_Scale(float *scale);
 uint8_t Get_CH_Values(uint16_t ad, float *cz, float *hb);
 
 
-uint8_t Get_Driver_Power(uint16_t PowerAd);
 #endif
 
 

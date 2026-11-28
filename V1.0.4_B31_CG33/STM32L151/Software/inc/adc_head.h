@@ -3,42 +3,21 @@
 
 #include "main.h"
 
+#define BATTERY_DIVIDER_TOP_KOHM        100.0f
+#define BATTERY_DIVIDER_BOTTOM_KOHM      33.0f
+#define BATTERY_ADC_SAMPLES                  8U
+#define BATTERY_LEVEL_1_V                  7.20f
+#define BATTERY_LEVEL_2_V                  7.44f
+#define BATTERY_LEVEL_3_V                  7.68f
+#define BATTERY_LEVEL_4_V                  7.92f
+#define BATTERY_LEVEL_HYST_V               0.06f
+#define BATTERY_LOW_ENTER_V                7.20f
+#define BATTERY_SAMPLE_PERIOD_MS            5000U
+#define BATTERY_FLASH_PERIOD_MS              350U
 
-
-// STM32L151的Vrefint校准值地址（请根据实际芯片参考手册确认）
-// 通常L1系列的Vrefint校准值在0x1FF80078
-#define VREFINT_CAL_ADDR  ((uint16_t*)0x1FF80078)
-#define VREFINT_TYPICAL_VOLTAGE         1.2f        // Vrefint典型电压1.2V
-#define VDDA_TYPICAL                    3.0f        // STM32L系列典型VDDA为3.0V
-
-
-
-// 函数声明
-void ADC1_Init(void);
-uint16_t ADC_ReadChannel(uint32_t channel);
-uint16_t ADC_ReadChannel9(void);
-uint16_t ADC_ReadVrefint(void);
-float ADC_GetChannel9Voltage(void);
-float ADC_GetVDDAVoltage(void);
-float ADC_GetVrefintVoltage(void);
-
-
-extern float  POWER_Vol;
-
-
-
-
-
-
-
-
+enum { BATTERY_ADC_WAIT, BATTERY_ADC_VALID, BATTERY_ADC_FAILED };
+uint8_t ADC_Battery_Step(float *volts);
+void ADC_Battery_Cancel(void);
+uint8_t Battery_Level_For_Voltage(float volts, uint8_t previous_level);
 
 #endif
-
-
-
-
-
-
-
-

@@ -168,6 +168,46 @@ static void test_ch_capture(void)
     CHECK(!Sensor_Get_Stable_GJ(&ad,0.003f));
 }
 
+static void test_bluetooth(void)
+{
+    static const uint8_t reply[] = "OK\r\n";
+    static const uint8_t data[] = "OK\r\n";
+    static const char off[] = "AT+ENAT\r\nAT+LEOF\r\nAT+SPOF\r\nAT+EXAT\r\n";
+    static const char on[]  = "AT+ENAT\r\nAT+LEON\r\nAT+SPON\r\nAT+EXAT\r\n";
+    uint8_t binary[16];
+    size_t pos = ntx2;
+    unsigned i, size;
+    Bluetooth_Startup();
+    CHECK(!Bluetooth_Busy() && Bluetooth_Status()==BT_BUSY);
+    fake_tick+=249U; Bluetooth_Service(); CHECK(ntx2==pos);
+    fake_tick++; Bluetooth_Service(); CHECK(Bluetooth_Busy());
+    size=u2(0x7FU,data,sizeof(data)-1U,binary);
+    feed(&huart2,binary,size);
+    CHECK(UART_Is_Frame_Ready(UART2_ID));
+    CHECK(memcmp(UART_Get_Frame_Data(UART2_ID),binary,size)==0);
+    UART_Clear_Frame_Flag(UART2_ID);
+    Bluetooth_Service(); CHECK(ntx2==pos+9U); /* Binary payload OK isn't an AT ACK. */
+    for (i=0;i<4U;++i) { feed(&huart2,reply,4U); Bluetooth_Service(); }
+    CHECK(Bluetooth_Status()==BT_OFF && !Bluetooth_Busy());
+    CHECK(ntx2==pos+sizeof(off)-1U && memcmp(tx2+pos,off,sizeof(off)-1U)==0);
+
+    pos=ntx2;
+    Bluetooth_Toggle(); Bluetooth_Service();
+    for (i=0;i<4U;++i) { feed(&huart2,reply,4U); Bluetooth_Service(); }
+    CHECK(Bluetooth_Status()==BT_ON && !Bluetooth_Busy());
+    CHECK(ntx2==pos+sizeof(on)-1U && memcmp(tx2+pos,on,sizeof(on)-1U)==0);
+
+    pos=ntx2; fake_tick=UINT32_MAX-12U;
+    Bluetooth_Toggle(); Bluetooth_Service(); /* Module absent. */
+    fake_tick+=79U; Bluetooth_Service(); CHECK(ntx2==pos+9U);
+    fake_tick++; Bluetooth_Service(); CHECK(ntx2==pos+18U);
+    fake_tick+=80U; Bluetooth_Service(); CHECK(ntx2==pos+27U);
+    fake_tick+=80U; Bluetooth_Service(); CHECK(Bluetooth_Status()==BT_ERROR && !Bluetooth_Busy());
+    feed(&huart2,binary,size); CHECK(UART_Is_Frame_Ready(UART2_ID));
+    UART_Clear_Frame_Flag(UART2_ID);
+    puts("CG41 Bluetooth: PASS startup OFF, ON, exact AT replies, timeout/wrap and binary UART coexistence");
+}
+
 int main(void) {
     uint8_t f[256], g[256], dat[256];
     unsigned len; size_t before;
@@ -368,5 +408,6 @@ int main(void) {
         (unsigned long)UART_Get_Bad_Frame_Count(UART2_ID));
     test_ch_capture();
     printf("CG38 UART/capture checks included: %u assertions total\n",tests);
+    test_bluetooth();
     return 0;
 }

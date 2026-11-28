@@ -75,18 +75,46 @@ void OLED_PrintString(unsigned x,unsigned y,char *text,unsigned font){
 }
 void OLED_PrintLine(unsigned a,unsigned b,unsigned y,uint8_t data){
     unsigned index;
+    if (y<2){CHECK(a==64 && b==128 && data==0);return;}
     CHECK(a<b && b<=128 && (y==4 || y==7));
     index=(y==4?0U:3U)+(a==20?0U:a==60?1U:2U);lines[index]=data;
 }
-static const char power_0_ico[16]={0},power_1_ico[16]={1},power_2_ico[16]={2},power_3_ico[16]={3},power_4_ico[16]={4},power_n_ico[16]={5};
-static uint8_t fake_level=2,last_icon=99;static unsigned samples=0,draws=0;
-uint16_t ADC_ReadChannel9(void){samples++;return 1234;}
-uint8_t Get_Driver_Power(uint16_t value){CHECK(value==1234);return fake_level;}
-void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,uint8_t *bitmap){
-    CHECK(x==105 && y==0 && w==16 && h==8);last_icon=bitmap[0];draws++;
+static const char power_0_ico[16]={0},power_1_ico[16]={1},power_2_ico[16]={2},power_3_ico[16]={3},power_4_ico[16]={4},power_n_ico[16]={255};
+static uint8_t last_icon=99, adc_ok=1;
+static unsigned samples=0,draws=0,low_beeps=0;
+static float fake_volts=8.10f;
+int8_t left_And_Righe_Status_History=1;
+#define page_size 20
+#define page_logo 0
+static unsigned Page_Id_History;
+enum { BATTERY_ADC_WAIT, BATTERY_ADC_VALID, BATTERY_ADC_FAILED };
+uint8_t ADC_Battery_Step(float *volts){samples++;*volts=fake_volts;return adc_ok ? BATTERY_ADC_VALID : BATTERY_ADC_FAILED;}
+void Beep_Low_Battery(void){low_beeps++;}
+void OLED_ShowImage(unsigned x,unsigned y,unsigned w,unsigned h,const uint8_t *bitmap){
+    CHECK(y==0);
+    if(x==64) {CHECK(w==64 && h==16);last_icon=5;}
+    else {CHECK(x==105 && w==16 && h==8);last_icon=bitmap[0];}
+    draws++;
 }
 '''
-a=oled.index('#define BATTERY_SAMPLE_PERIOD_MS');b=oled.index('/*************************',a)
+adc=read('STM32L151/Software/src/adc_code.c')
+adc_header=read('STM32L151/Software/inc/adc_head.h')
+code+='\n'.join(x for x in adc_header.splitlines() if x.startswith('#define BATTERY_'))+'\n'
+code+='\n'.join(x for x in adc.splitlines() if x.startswith(('#define VREFINT_', '#define ADC_MAX_CODE')))+'\n'
+code+=extract(adc,'static float Battery_VDDA(')
+keys=read('STM32L151/Software/src/key_code.c')
+code+="""
+#define Beep_Ctrl_GPIO_Port 1U
+#define Beep_Ctrl_Pin 2U
+#define GPIO_PIN_SET 1U
+#define GPIO_PIN_RESET 0U
+static unsigned beep_pin;
+static void HAL_GPIO_WritePin(unsigned port,unsigned pin,unsigned value)
+{ CHECK(port==1U && pin==2U); beep_pin=value; }
+"""
+code+=keys[keys.index('static uint32_t Beep_Last_Time'):keys.index('void Key_Fun_Select')].replace('Beep_Low_Battery(', 'Test_Low_Battery(').replace('void Beep_Ctrl(', 'void Test_Beep_Ctrl(')
+code+=extract(adc,'uint8_t Battery_Level_For_Voltage(')
+a=oled.index('static uint8_t Battery_Level ='); b=oled.index('/*************************',a)
 code+=oled[a:b]
 for sig in ['void Time_Set_Page_Init(', 'void Time_Set_Page_Reflash(']:code+=extract(oled,sig)
 for sig in ['void Reduce_Time_For_Time_Select(', 'void InCrease_Time_For_Time_Select(', 'void Change_Time_Select_Id(', 'void Change_Time_For_Set_Time(']:code+=extract(key,sig)
@@ -160,7 +188,7 @@ static void test_rtc_and_editor(void){
     Time_Set_Page_Reflash();CHECK(strstr(last_text,"RTC READ ERROR")!=0);
     InCrease_Time_For_Time_Select();CHECK(Set_Time_Error==0);
     Measurement_Time_Refresh();CHECK(strcmp(last_text,"--/--/-- --:--")==0);fail_rx=0;
-    good_rtc();Measurement_Time_Refresh();CHECK(strcmp(last_text,"26/11/24 12:30")==0);
+    good_rtc();tick+=1000U;Measurement_Time_Refresh();CHECK(strcmp(last_text,"26/11/24 12:30")==0);
     registers[7]|=0x80;Time_Set_Page_Init();CHECK(Set_Time_Error==1);good_rtc();
     edit(26,11,24,12,30,15);Set_Time_Select=255;Set_Time_Select_History=255;
     for(i=0;i<6;i++)pixels[i<3?2:5][(i%3)*40+36]='9';
@@ -175,22 +203,59 @@ static void test_rtc_and_editor(void){
     CHECK(PCF8563_GetTime(&hi2c2,0)!=HAL_OK && PCF8563_SetTime(&hi2c2,0)!=HAL_OK);
     puts("CG39 RTC/editor: PASS; register encoding, invalid BCD/date/VL, I2C failures, complete save fields, error/retry, 999 suffix erase, selection and OLED bounds");
 }
-static void battery_reset(void){Battery_Initialized=0;Battery_Force_Redraw=1;Battery_Last_Icon=255;samples=draws=0;}
 static void test_battery(void){
-    unsigned level,before;tick=0;fake_level=2;battery_reset();Measurement_Battery_Refresh();CHECK(last_icon==2 && samples==1 && draws==1);
-    Battery_Force_Redraw=1;Measurement_Battery_Refresh();CHECK(samples==1 && draws==2 && last_icon==2);
-    tick=4999;Measurement_Battery_Refresh();CHECK(samples==1);tick=5000;fake_level=1;Measurement_Battery_Refresh();CHECK(last_icon==1 && samples==2);
-    for(level=0;level<=4;level++){tick+=5000;fake_level=(uint8_t)level;Measurement_Battery_Refresh();CHECK(last_icon==level);}
-    tick+=5000;fake_level=0;Measurement_Battery_Refresh();CHECK(last_icon==0);before=samples;
-    tick+=499;Measurement_Battery_Refresh();CHECK(last_icon==0);tick++;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
-    Battery_Force_Redraw=1;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
-    tick+=500;Measurement_Battery_Refresh();CHECK(last_icon==0);
-    tick+=2500;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
-    tick+=1500;fake_level=3;Measurement_Battery_Refresh();CHECK(last_icon==3 && samples==before+1);
-    tick=UINT32_MAX-100;fake_level=0;battery_reset();Measurement_Battery_Refresh();before=samples;
-    tick+=500;Measurement_Battery_Refresh();CHECK(last_icon==5 && samples==before);
-    tick+=4500;fake_level=4;Measurement_Battery_Refresh();CHECK(last_icon==4 && samples==before+1);
-    puts("CG39 battery: PASS; shared cached icons, immediate page redraw, five-second sampling, 500 ms blinking, recovery and tick wrap");
+    unsigned read_before, draw_before, beeps_before, elapsed, pulses=0, previous=0;
+    uint8_t fallback=99;
+    CHECK(Battery_VDDA(1500.0f,1650,&fallback)==3.3f && !fallback);
+    CHECK(Battery_VDDA(0.0f,1650,&fallback)==0.0f);
+    CHECK(Battery_VDDA(4095.0f,1650,&fallback)==0.0f);
+    CHECK(Battery_VDDA(1500.0f,0xFFFF,&fallback)>3.3f && fallback);
+    CHECK(Battery_VDDA(1500.0f,0,&fallback)>3.3f && fallback);
+    tick=UINT32_MAX-10U; fake_volts=7.19f;
+    Measurement_Power_Session();
+    Measurement_Battery_Service();
+    CHECK(samples==0 && low_beeps==0);
+    tick+=25; Measurement_Battery_Service(); Measurement_Battery_Refresh();
+    CHECK(samples==1 && last_icon==5 && low_beeps==1);
+    tick+=349; Measurement_Battery_Refresh(); CHECK(last_icon==5);
+    tick++; Measurement_Battery_Refresh(); CHECK(last_icon==0);
+    tick+=350; Measurement_Battery_Refresh(); CHECK(last_icon==5);
+    tick+=350; Measurement_Battery_Refresh(); CHECK(last_icon==0);
+    tick+=350; Measurement_Battery_Refresh();
+    CHECK(Battery_Warned==2 && low_beeps==1);
+    fake_volts=7.95f; tick+=5000; Measurement_Battery_Service();
+    Measurement_Battery_Refresh(); CHECK(last_icon==3);
+    fake_volts=8.01f; tick+=5000; Measurement_Battery_Service();
+    Measurement_Battery_Refresh(); CHECK(last_icon==4);
+    fake_volts=7.91f; tick+=5000; Measurement_Battery_Service();
+    Measurement_Battery_Refresh(); CHECK(last_icon==4);
+    fake_volts=7.10f; tick+=5000; Measurement_Battery_Service();
+    Measurement_Battery_Refresh(); CHECK(last_icon==0 && low_beeps==1);
+    adc_ok=0; fake_volts=8.2f; tick+=5000; Measurement_Battery_Service();
+    Measurement_Battery_Refresh(); CHECK(last_icon==0 && low_beeps==1);
+    adc_ok=1;
+    draw_before=draws; Battery_Force_Redraw=1; Measurement_Battery_Refresh();
+    CHECK(draws==draw_before+1);
+    beeps_before=low_beeps; Measurement_Power_Session();
+    fake_volts=7.0f; tick+=25; Measurement_Battery_Service(); Measurement_Battery_Refresh();
+    CHECK(last_icon==5 && low_beeps==beeps_before+1);
+    tick+=1400; Measurement_Battery_Refresh();
+    read_before=rx_calls; Clock_Force_Redraw=1;
+    Measurement_Time_Refresh(); Measurement_Time_Refresh();
+    CHECK(rx_calls==read_before+1);
+    tick+=999; Measurement_Time_Refresh(); CHECK(rx_calls==read_before+1);
+    tick++; Measurement_Time_Refresh(); CHECK(rx_calls==read_before+2);
+    tick=UINT32_MAX-50U;
+    Test_Low_Battery();
+    for(elapsed=0;elapsed<400U;++elapsed,++tick){
+        Test_Beep_Ctrl(100U,0U);
+        Beep_Reflash();
+        if(beep_pin && !previous) pulses++;
+        CHECK(beep_pin==(elapsed<360U && elapsed%120U<60U));
+        previous=beep_pin;
+    }
+    CHECK(pulses==3);
+    puts("CG41 battery/RTC: PASS once per power cycle, two flashes, recovery/retrigger rejection, ADC failure, hysteresis, time throttling");
 }
 int main(void){test_calendar();test_rtc_and_editor();test_battery();printf("CG39 UI tests: PASS %u checks\n",checks);return 0;}
 '''

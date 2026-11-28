@@ -19,6 +19,8 @@ typedef struct
 
 
 void Page_init(void);
+void Measurement_Power_Session(void);
+void Measurement_Battery_Service(void);
 void oled_Reflash(void);
 
 

@@ -166,10 +166,10 @@ uint8_t PCF8563_GetTime(I2C_HandleTypeDef *hi2c, PCF8563_TimeTypeDef *time)
     HAL_StatusTypeDef status;
     PCF8563_TimeTypeDef decoded;
     if (hi2c==0 || time==0) return HAL_ERROR;
-    status=HAL_I2C_Master_Transmit(hi2c,PCF8563_ADDR_WRITE,&reg_addr,1,100);
+    status=HAL_I2C_Master_Transmit(hi2c,PCF8563_ADDR_WRITE,&reg_addr,1,5U);
     if (status!=HAL_OK) return status;
     /* NXP: seconds through years must be read in one access. */
-    status=HAL_I2C_Master_Receive(hi2c,PCF8563_ADDR_READ,data,7,100);
+    status=HAL_I2C_Master_Receive(hi2c,PCF8563_ADDR_READ,data,7,5U);
     if (status!=HAL_OK) return status;
     if ((data[0]&PCF8563_SC_VL)!=0U) return HAL_ERROR;
     for (i=0U;i<7U;++i)

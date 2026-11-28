@@ -1,6 +1,8 @@
 #ifndef __KEY_HEAD_H
 #define __KEY_HEAD_H
 
+void Beep_Low_Battery(void);
+
 #include "main.h"
 
 #include "App_oled.h"

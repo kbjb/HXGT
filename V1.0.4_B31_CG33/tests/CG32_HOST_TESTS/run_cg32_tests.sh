@@ -7,8 +7,7 @@ T=$(mktemp -d /tmp/cg32_XXXXXX)
 trap 'rm -rf "$T"' EXIT
 cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-pointer -I "$ROOT/QINGJIAOBAN/USER" "$HERE/test_filter.c" -o "$T/test_filter"
 UBSAN_OPTIONS=halt_on_error=1 "$T/test_filter"
-cc -std=c99 -O1 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-omit-frame-pointer -I "$HERE" "$ROOT/QINGJIAOBAN/CLASS/SCR/adc161_code.c" "$HERE/test_adc.c" -o "$T/test_adc"
-UBSAN_OPTIONS=halt_on_error=1 "$T/test_adc"
+python3 "$HERE/test_spi_decode.py"
 python3 "$TESTS/CG34_HOST_TESTS/test_sampling.py"
 python3 "$TESTS/CG_FIX_HOST_TESTS/test_cg.py"
 python3 "$TESTS/CG40_HOST_TESTS/test_temperature.py"

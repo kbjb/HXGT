@@ -9,6 +9,98 @@ static UART_Manager_t uart_managers[UART_MAX];
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 
+#define BT_BOOT_DELAY_MS 250U
+#define BT_REPLY_TIMEOUT_MS 80U
+#define BT_TX_TIMEOUT_MS 5U
+
+static uint8_t bt_status = BT_UNKNOWN, bt_target, bt_step;
+static uint8_t bt_waiting, bt_failed, bt_boot_delay, bt_exit_retry;
+static uint32_t bt_tick;
+static volatile uint8_t bt_listening, bt_reply, bt_reply_index;
+
+uint8_t Bluetooth_Status(void) { return bt_status; }
+uint8_t Bluetooth_Busy(void) { return bt_status == BT_BUSY && !bt_boot_delay; }
+
+static void Bluetooth_Request(uint8_t enabled, uint8_t boot)
+{
+    bt_listening = 0U;
+    bt_status = BT_BUSY;
+    bt_target = enabled;
+    bt_step = 0U;
+    bt_waiting = 0U;
+    bt_failed = 0U;
+    bt_exit_retry = 0U;
+    bt_boot_delay = boot;
+    bt_tick = HAL_GetTick();
+}
+
+void Bluetooth_Startup(void)
+{
+    Bluetooth_Request(0U,1U);
+}
+
+void Bluetooth_Toggle(void)
+{
+    if (bt_status != BT_BUSY) Bluetooth_Request(bt_status != BT_ON,0U);
+}
+
+static uint8_t Bluetooth_Consume_Reply(uint8_t byte)
+{
+    static const char ok[] = "OK\r\n";
+    if (!bt_listening || bt_reply) return 0U;
+    if (byte == (uint8_t)ok[bt_reply_index])
+    {
+        if (++bt_reply_index == sizeof(ok)-1U) bt_reply = 1U;
+        return 1U;
+    }
+    bt_reply_index = byte == 'O' ? 1U : 0U;
+    return bt_reply_index != 0U;
+}
+
+void Bluetooth_Service(void)
+{
+    static const char * const on[]  = {"AT+ENAT\r\n","AT+LEON\r\n","AT+SPON\r\n","AT+EXAT\r\n"};
+    static const char * const off[] = {"AT+ENAT\r\n","AT+LEOF\r\n","AT+SPOF\r\n","AT+EXAT\r\n"};
+    uint8_t accepted;
+    const char *command;
+    if (bt_status != BT_BUSY) return;
+    /* Leave USART2 available for PC traffic during module startup. */
+    if (bt_boot_delay && (uint32_t)(HAL_GetTick()-bt_tick) < BT_BOOT_DELAY_MS) return;
+    bt_boot_delay = 0U;
+
+    if (bt_waiting)
+    {
+        accepted = bt_reply;
+        if (!accepted && (uint32_t)(HAL_GetTick()-bt_tick) < BT_REPLY_TIMEOUT_MS) return;
+        bt_listening = 0U;
+        bt_waiting = 0U;
+        if (!accepted) bt_failed = 1U;
+        if (bt_step == 3U)
+        {
+            if (accepted || bt_exit_retry)
+            {
+                bt_status = bt_failed ? BT_ERROR : bt_target ? BT_ON : BT_OFF;
+                return;
+            }
+            bt_exit_retry = 1U;
+        }
+        else
+        {
+            if (bt_step == 0U && !accepted) bt_step = 3U;
+            else bt_step++;
+        }
+    }
+
+    command = bt_target ? on[bt_step] : off[bt_step];
+    bt_reply = 0U;
+    bt_reply_index = 0U;
+    bt_listening = 1U;
+    bt_waiting = 1U;
+    bt_tick = HAL_GetTick();
+    if (HAL_UART_Transmit(&huart2,(uint8_t *)command,(uint16_t)strlen(command),BT_TX_TIMEOUT_MS) != HAL_OK)
+        bt_tick -= BT_REPLY_TIMEOUT_MS;
+}
+
 static UART_ID_t UART_B2_Id(const UART_HandleTypeDef *huart)
 {
     if (huart == NULL) return UART_MAX;
@@ -224,7 +316,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     manager = &uart_managers[uart_id];
     if (manager->huart != huart) return;
     manager->rx_armed = 0;
-    UART_B2_Consume_Byte(uart_id, manager->rx_byte);
+    if (uart_id != UART2_ID || manager->rx_index != 0U ||
+        !Bluetooth_Consume_Reply(manager->rx_byte))
+        UART_B2_Consume_Byte(uart_id, manager->rx_byte);
     UART_B2_Arm(manager);
 }
 

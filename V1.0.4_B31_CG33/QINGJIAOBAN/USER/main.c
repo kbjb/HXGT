@@ -182,8 +182,7 @@ DataParm AngleParam;
 * 输    入         : 无
 * 输    出         : 无
 *******************************************************************************/
-/* [CG34] TIM2 runs at 1 MHz. The F103 clock setup uses APB1=HCLK/2,
- * so the APB1 timer clock equals SystemCoreClock (72 MHz). */
+/* APB1 prescaler is 1. TIM2 input is HCLK at HSE 8 MHz. */
 static void Sensor_Timer_Init(void)
 {
     TIM_TimeBaseInitTypeDef timer;
@@ -207,6 +206,9 @@ int main(void)
     uint32_t sample_tick = 0U;
     uint32_t last_sample_tick = 0U;
     uint32_t auxiliary_tick = 0U;
+    SystemCoreClockUpdate();
+    if ((RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_HSE)
+        RCC->CR &= ~RCC_CR_HSION;
     Sensor_Timer_Init();
     /*配置串口1*/ 
     usart1_str.str_init(&usart1_str);
@@ -228,8 +230,14 @@ int main(void)
     while(1)
     {
         
-        uint32_t now = sensor_tick_ms;
-        uint32_t elapsed = (uint32_t)(now - sample_tick);
+        uint32_t now, elapsed;
+        uint8_t send_due;
+        __disable_irq();
+        now = sensor_tick_ms;
+        send_due = send_en;
+        send_en = 0U;
+        __enable_irq();
+        elapsed = (uint32_t)(now - sample_tick);
         if (elapsed >= SENSOR_SAMPLE_PERIOD_MS)
         {
             sample_tick += SENSOR_SAMPLE_PERIOD_MS;
@@ -241,8 +249,8 @@ int main(void)
                 sample_tick = now; /* Do not fabricate catch-up samples. */
                 CG_AngleFilter_Init(&CG_Angle_Filter);
             }
-            adc161_str.read(&adc161_str);
-            adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
+            if (adc161_str.read(&adc161_str))
+                adc161_aver = CG_AngleFilter_Push(&CG_Angle_Filter, adc161_str.ad_data);
             AngleParam.realValue = CG_Angle_Filter.filtered_value;
             AngleParam.StableValue = CG_Angle_Filter.output_value;
             AngleParam.PreTempValue = CG_Angle_Filter.raw_value;
@@ -255,7 +263,10 @@ int main(void)
          * The I2C callback uses 5 us timer delays instead of 10000-spin waits. */
         if ((uint32_t)(now - auxiliary_tick) >= SENSOR_SEND_PERIOD_MS)
         {
-            auxiliary_tick = now;
+            if ((uint32_t)(now - auxiliary_tick) >= 2U * SENSOR_SEND_PERIOD_MS)
+                auxiliary_tick = now;
+            else
+                auxiliary_tick += SENSOR_SEND_PERIOD_MS;
             ads1110_str.read(&ads1110_str);
             if ((ads1110_str.config >> 7) == 0)
                 ads1110_aver = ads1110_aver * 0.5f +
@@ -280,9 +291,8 @@ int main(void)
             usart1_str.rx_ok = 0;
         }
         // Transmit sensor frame (original 13-byte protocol retained).
-        if(send_en == 1)
+        if (send_due)
         {
-            send_en  = 0; /* [B2] SysTick is the sole TX scheduler. */
             FToI fToI;
             UToI uToI;
             uint8_t buffer[13] = {0x5A};
@@ -303,7 +313,15 @@ int main(void)
             usart1_str.send_string(&usart1_str,(char *)buffer,13);
         }
         
-//        IWDG_ReloadCounter();  // 重载计数器
+        /* A pending SysTick or RX IRQ wakes WFI with PRIMASK set.
+         * Recheck work under the mask to avoid sleeping past a due slot. */
+        __disable_irq();
+        if (sensor_tick_ms == now && !send_en && !usart1_str.rx_ok)
+        {
+            __DSB();
+            __WFI();
+        }
+        __enable_irq();
     }
 }
 

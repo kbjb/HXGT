@@ -71,7 +71,7 @@ void Beep_Ctrl(unsigned ms,unsigned n){(void)ms;beeps=n;}
 static unsigned storage_state=1,page_id=0;
 unsigned Eep_Get_Storage_State(void){return storage_state;}
 typedef struct {unsigned year,month,day,hour,minute;} PCF8563_TimeTypeDef;
-static uint8_t Battery_Force_Redraw;
+static uint8_t Battery_Force_Redraw, Clock_Force_Redraw;
 void Measurement_Battery_Refresh(void){}
 void Measurement_Time_Refresh(void){}
 void PCF8563_GetTime(void *h,PCF8563_TimeTypeDef *t){(void)h;*t=(PCF8563_TimeTypeDef){26,11,23,12,0};}

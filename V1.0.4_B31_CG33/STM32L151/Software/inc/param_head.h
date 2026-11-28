@@ -147,7 +147,7 @@ void set_PageId(PAGE_ID pageId);
 
 
 
-#define MENU_ID_NUMBER  5
+#define MENU_ID_NUMBER  6
 
 
 

@@ -48,6 +48,14 @@ typedef enum {
 // º¯ÊýÉùÃ÷
 
 void     UART_Init(void);
+
+enum { BT_UNKNOWN, BT_OFF, BT_ON, BT_BUSY, BT_ERROR };
+void Bluetooth_Startup(void);
+void Bluetooth_Toggle(void);
+void Bluetooth_Service(void);
+uint8_t Bluetooth_Busy(void);
+uint8_t Bluetooth_Status(void);
+
 /* [B2] Run from main loop, NEVER from UART IRQ. */
 void     UART_Process_Received(UART_ID_t uart_id);
 uint32_t UART_Get_Bad_Frame_Count(UART_ID_t uart_id);

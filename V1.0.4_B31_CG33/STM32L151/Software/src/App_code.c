@@ -4,11 +4,16 @@
 #include "agreement_head.h" /* [CG32-04] sensor-frame freshness */
 #include "App_Eep.h"        /* [CG32-04] EEPROM readiness */
 #include "adc_head.h"
+#include "usart_head.h"
+#include "key_head.h"
+#include <string.h>
 
 static PAGE_FUN_T Page_Fun_Buffere[page_size];
 /* [CGFIX-02] Force the first reading to render after OLED_Clear(), even 0.00. */
 static uint8_t Main_Values_Need_Redraw = 1U;
 static uint8_t CG_Display_Status_History = 0xFFU;
+static PAGE_ID Page_Id_History = page_size;
+static uint8_t Goal_Marker_History = 0xFFU;
 
 
 
@@ -23,6 +28,7 @@ void logo_Page_Init(void)
 {
     //OLED_ShowImage(18,6,92,27,(uint8_t *)logo_ico);
     OLED_PrintChinese(32,2,"华夏高铁");
+    OLED_PrintString(28,4,"CG41 TEST",FONT_8X16);
     ReflashTime = HAL_GetTick();
 }
 
@@ -30,7 +36,6 @@ void logo_Page_Reflash(void)
 {
     uint32_t CurrentTime=HAL_GetTick();
     
-    OLED_PrintString(40,4,"CG40 TEST",FONT_8X16);
     if((CurrentTime-ReflashTime)>1500)
     {
         set_PageId(page_main);
@@ -38,75 +43,133 @@ void logo_Page_Reflash(void)
 }
 
 extern I2C_HandleTypeDef hi2c2;
-/* [CG39] Shared measurement-page battery state. Sampling is independent
- * from low-battery blinking, and entering a page redraws the cached level. */
-#define BATTERY_SAMPLE_PERIOD_MS 5000U
-#define BATTERY_BLINK_PERIOD_MS   500U
-static uint8_t Battery_Initialized=0U, Battery_Level=0U;
-static uint8_t Battery_Visible=1U, Battery_Force_Redraw=1U;
-static uint8_t Battery_Last_Icon=0xFFU;
-static uint32_t Battery_Sample_Tick=0U, Battery_Blink_Tick=0U;
+/* Battery and clock caches are shared by both measurement pages. */
+static uint8_t Battery_Level = 0xFFU;
+static uint8_t Battery_Force_Redraw = 1U;
+static uint8_t Battery_Last_Icon = 0xFFU;
+static uint8_t Battery_Low_Detected, Battery_Warned, Battery_Sampling;
+static uint32_t Battery_Sample_Tick, Battery_Warning_Tick;
+
+static uint8_t Clock_Force_Redraw = 1U;
+static uint32_t Clock_Read_Tick;
+static char Clock_Text[20] = "--/--/-- --:--";
+static char Clock_Displayed[20];
+static const uint8_t Charge_Text[128] = {
+    0x00, 0x00, 0x04, 0x04, 0xE4, 0xFC, 0x84, 0x04, 0x04, 0x74, 0x7C, 0xC4, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0xFC, 0x4C, 0x44, 0x4C, 0xFC, 0x10, 0x90, 0x90, 0x10, 0x10, 0xFE, 0xFE, 0x10, 0x10, 0x00,
+    0x00, 0x08, 0x08, 0xC8, 0xE8, 0xB8, 0x98, 0x8E, 0x88, 0xE8, 0x68, 0xC8, 0x88, 0x08, 0x00, 0x00,
+    0x00, 0xF0, 0xF8, 0x48, 0x48, 0x48, 0xFE, 0xFE, 0x48, 0x48, 0x48, 0xF8, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x30, 0x18, 0x2E, 0x23, 0x20, 0x31, 0x13, 0x0C, 0x0C, 0x1F, 0x11, 0x30, 0x20, 0x00, 0x00,
+    0x00, 0x1F, 0x04, 0x04, 0x04, 0x0F, 0x00, 0x00, 0x03, 0x00, 0x20, 0x3F, 0x1F, 0x00, 0x00, 0x00,
+    0x00, 0x20, 0x20, 0x30, 0x18, 0x0F, 0x00, 0x00, 0x1F, 0x3F, 0x20, 0x20, 0x30, 0x38, 0x00, 0x00,
+    0x00, 0x07, 0x0F, 0x04, 0x04, 0x04, 0x3F, 0x3F, 0x24, 0x24, 0x24, 0x27, 0x20, 0x30, 0x00, 0x00,
+};
+
+void Measurement_Power_Session(void)
+{
+    uint32_t now = HAL_GetTick();
+    Battery_Level = 0xFFU;
+    Battery_Low_Detected = 0U;
+    Battery_Warned = 0U;
+    Battery_Sampling = 0U;
+    Battery_Sample_Tick = now - BATTERY_SAMPLE_PERIOD_MS + 25U;
+    Clock_Read_Tick = now - 1000U;
+    Clock_Force_Redraw = 1U;
+    Page_Id_History = page_size;
+    set_PageId(page_logo);
+}
+
+void Measurement_Battery_Service(void)
+{
+    uint32_t now = HAL_GetTick();
+    float volts;
+    uint8_t result;
+    if (!Battery_Sampling && (uint32_t)(now - Battery_Sample_Tick) < BATTERY_SAMPLE_PERIOD_MS) return;
+    Battery_Sampling = 1U;
+    result = ADC_Battery_Step(&volts);
+    if (result == BATTERY_ADC_WAIT) return;
+    Battery_Sampling = 0U;
+    Battery_Sample_Tick = now;
+    if (result == BATTERY_ADC_VALID)
+    {
+        Battery_Level = Battery_Level_For_Voltage(volts, Battery_Level);
+        if (volts <= BATTERY_LOW_ENTER_V) Battery_Low_Detected = 1U;
+    }
+}
 
 static void Measurement_Battery_Refresh(void)
 {
-    uint32_t now=HAL_GetTick();
-    uint8_t redraw=Battery_Force_Redraw;
-    uint8_t icon;
-    const char *bitmap;
-    if (!Battery_Initialized || (uint32_t)(now-Battery_Sample_Tick)>=BATTERY_SAMPLE_PERIOD_MS)
+    static const char * const icons[] = {
+        power_0_ico, power_1_ico, power_2_ico, power_3_ico, power_4_ico
+    };
+    uint32_t now = HAL_GetTick();
+    uint32_t age;
+    uint8_t icon = Battery_Level;
+    if (!Battery_Warned && Battery_Low_Detected)
     {
-        uint8_t previous=Battery_Level;
-        Battery_Level=Get_Driver_Power(ADC_ReadChannel9());
-        Battery_Sample_Tick=now;
-        if (!Battery_Initialized || previous!=Battery_Level)
+        Battery_Warned = 1U;
+        Battery_Warning_Tick = now;
+        Beep_Low_Battery();
+    }
+
+    age = (uint32_t)(now - Battery_Warning_Tick);
+    if (Battery_Warned && age < 4U * BATTERY_FLASH_PERIOD_MS &&
+        (age / BATTERY_FLASH_PERIOD_MS) % 2U == 0U)
+        icon = 5U;
+    /* Retire the visual timer once the two flashes are done, even across tick wrap. */
+    if (Battery_Warned == 1U && age >= 4U * BATTERY_FLASH_PERIOD_MS) Battery_Warned = 2U;
+    if (Battery_Warned == 2U) icon = Battery_Level;
+    if (!Battery_Force_Redraw && icon == Battery_Last_Icon) return;
+
+    if (icon == 5U)
+    {
+        OLED_ShowImage(64,0,64,16,Charge_Text);
+    }
+    else
+    {
+        if (Battery_Last_Icon == 5U)
         {
-            Battery_Visible=1U;
-            Battery_Blink_Tick=now;
-            redraw=1U;
+            OLED_PrintLine(64,128,0,0U);
+            OLED_PrintLine(64,128,1,0U);
+            Clock_Force_Redraw = 1U;
+            left_And_Righe_Status_History = 0;
         }
-        Battery_Initialized=1U;
+        OLED_ShowImage(105,0,16,8,(const uint8_t *)(icon <= 4U ? icons[icon] : power_n_ico));
     }
-    if (Battery_Level==0U && (uint32_t)(now-Battery_Blink_Tick)>=BATTERY_BLINK_PERIOD_MS)
-    {
-        uint32_t periods=(uint32_t)(now-Battery_Blink_Tick)/BATTERY_BLINK_PERIOD_MS;
-        if ((periods&1U)!=0U) Battery_Visible=1U-Battery_Visible;
-        Battery_Blink_Tick+=periods*BATTERY_BLINK_PERIOD_MS;
-    }
-    icon=Battery_Level==0U && !Battery_Visible ? 5U : Battery_Level;
-    if (redraw || icon!=Battery_Last_Icon)
-    {
-        switch(icon)
-        {
-            case 0U: bitmap=power_0_ico; break;
-            case 1U: bitmap=power_1_ico; break;
-            case 2U: bitmap=power_2_ico; break;
-            case 3U: bitmap=power_3_ico; break;
-            case 4U: bitmap=power_4_ico; break;
-            default: bitmap=power_n_ico; break;
-        }
-        OLED_ShowImage(105,0,16,8,(uint8_t *)bitmap);
-        Battery_Last_Icon=icon;
-    }
-    Battery_Force_Redraw=0U;
+    Battery_Last_Icon = icon;
+    Battery_Force_Redraw = 0U;
 }
 
 static void Measurement_Time_Refresh(void)
 {
+    uint32_t now = HAL_GetTick();
     PCF8563_TimeTypeDef time;
-    char text[20];
-    if (PCF8563_GetTime(&hi2c2,&time)==HAL_OK && time.century==0U)
-        snprintf(text,sizeof(text),"%02u/%02u/%02u %02u:%02u",(unsigned)time.year,
-                 (unsigned)time.month,(unsigned)time.day,(unsigned)time.hour,(unsigned)time.minute);
-    else snprintf(text,sizeof(text),"--/--/-- --:--");
-    OLED_PrintString(5,0,text,FONT_6X8);
+    if ((uint32_t)(now - Clock_Read_Tick) >= 1000U)
+    {
+        Clock_Read_Tick = now;
+        if (PCF8563_GetTime(&hi2c2,&time)==HAL_OK && time.century==0U)
+            snprintf(Clock_Text,sizeof(Clock_Text),"%02u/%02u/%02u %02u:%02u",
+                     (unsigned)time.year,(unsigned)time.month,(unsigned)time.day,
+                     (unsigned)time.hour,(unsigned)time.minute);
+        else strcpy(Clock_Text,"--/--/-- --:--");
+    }
+    if (Battery_Last_Icon != 5U &&
+        (Clock_Force_Redraw || strcmp(Clock_Displayed, Clock_Text) != 0))
+    {
+        OLED_PrintString(5,0,Clock_Text,FONT_6X8);
+        strcpy(Clock_Displayed, Clock_Text);
+        Clock_Force_Redraw = 0U;
+    }
 }
 
 /*************************主界面***************************/
 void Main_Page_Init(void)
 {
     Battery_Force_Redraw=1U;
+    Clock_Force_Redraw=1U;
     Main_Values_Need_Redraw = 1U;
     CG_Display_Status_History = 0xFFU;
+    Goal_Marker_History = 0xFFU;
     CG_Value_History = 0;
     GJ_Value_History = 0;
     left_And_Righe_Status_History = 1-left_And_Righe_Status;
@@ -117,7 +180,6 @@ void Main_Page_Init(void)
 }
 
 
-extern I2C_HandleTypeDef hi2c2;
 void Main_Page_Reflash(void)
 {
     char buffer[20];
@@ -174,26 +236,23 @@ void Main_Page_Reflash(void)
     }
 
     Main_Values_Need_Redraw = 0U; /* [CGFIX-02] */
-    Measurement_Time_Refresh();
     Measurement_Battery_Refresh();
-    if(Goal_Set_Status == 1)
+    Measurement_Time_Refresh();
+    if (Goal_Marker_History != Goal_Set_Status)
     {
-        OLED_PrintString(5,1,"MUBIAO",FONT_6X8);
-        if (CG_Result_Status == CG_RESULT_OK && Sensor_Data_Is_Fresh() &&
-            Eep_Get_Storage_State() == EEP_STATE_B3_VALID &&
-            CG_Value>Goal_CG_Min_Value && CG_Value<Goal_CG_Max_Value)
-        {
-            Beep_Ctrl(100,3);
-        }
-        if(GJ_Value>Goal_CJ_Min_Value&&GJ_Value<Goal_CJ_Max_Value)
-        {
-            Beep_Ctrl(100,3);
-        }
+        OLED_PrintString(5,1,Goal_Set_Status == 1 ? "MUBIAO" : "      ",FONT_6X8);
+        Goal_Marker_History = Goal_Set_Status;
     }
-    else
-        OLED_PrintString(5,1,"      ",FONT_6X8);
+    {
+        uint8_t in_range = Goal_Set_Status == 1 &&
+            ((CG_Result_Status == CG_RESULT_OK && Sensor_Data_Is_Fresh() &&
+              Eep_Get_Storage_State() == EEP_STATE_B3_VALID &&
+              CG_Value > Goal_CG_Min_Value && CG_Value < Goal_CG_Max_Value) ||
+             (GJ_Value > Goal_CJ_Min_Value && GJ_Value < Goal_CJ_Max_Value));
+        if (in_range) Beep_Ctrl(100U,3U);
+    }
     /*显示左右股状态*/
-    if(left_And_Righe_Status_History!= left_And_Righe_Status)
+    if (Battery_Last_Icon != 5U && left_And_Righe_Status_History != left_And_Righe_Status)
     {
         if(left_And_Righe_Status == 1)
         {
@@ -218,6 +277,7 @@ static uint8_t CH_Values_Need_Redraw=1U;
 void CH_Page_Init(void)
 {
     Battery_Force_Redraw=1U;
+    Clock_Force_Redraw=1U;
     CZ_Value_S = 0,HB_Value_S = 0;
     CH_Display_Status_History=0xFFU;
     CH_Values_Need_Redraw=1U;
@@ -274,71 +334,59 @@ void CH_Page_Reflash(void)
         }
     }
     CH_Values_Need_Redraw=0U;
-    Measurement_Time_Refresh();
     Measurement_Battery_Refresh();
+    Measurement_Time_Refresh();
 }
 
 /************************菜单选择界面***************************/
 
-static int8_t  menu_Show_Start;
-char Menu_buffer[MENU_ID_NUMBER][8] = {"时间设置","目标设置","标定设置","密码设置","精度设置"};
+static const char Menu_buffer[MENU_ID_NUMBER-1U][9] = {
+    "时间设置","目标设置","标定设置","密码设置","精度设置"
+};
+static const uint8_t Bluetooth_Menu_Text[128] = {
+    0x00, 0x04, 0xE4, 0x04, 0x04, 0xEE, 0x04, 0x84, 0xE4, 0x7E, 0xC4, 0x44, 0x44, 0x44, 0x00, 0x00,
+    0x00, 0x00, 0x46, 0x76, 0x5E, 0x46, 0x46, 0xC6, 0xC6, 0xFE, 0x46, 0x46, 0x44, 0x40, 0x00, 0x00,
+    0x00, 0x80, 0x86, 0x86, 0x86, 0xFE, 0xC6, 0x86, 0x86, 0xFE, 0xFE, 0x86, 0x86, 0x80, 0x00, 0x00,
+    0x00, 0x00, 0x10, 0x10, 0x12, 0x1C, 0x10, 0xF0, 0x10, 0x1E, 0x12, 0x10, 0x10, 0x00, 0x00, 0x00,
+    0x00, 0x20, 0x3D, 0x3C, 0x24, 0x3F, 0x3C, 0x25, 0x3C, 0x3C, 0x25, 0x3D, 0x3C, 0x20, 0x00, 0x00,
+    0x00, 0x30, 0x30, 0x18, 0x08, 0x0C, 0x06, 0x23, 0x20, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x30, 0x30, 0x1C, 0x07, 0x00, 0x00, 0x00, 0x3F, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x21, 0x21, 0x31, 0x11, 0x19, 0x0F, 0x03, 0x07, 0x0D, 0x19, 0x31, 0x31, 0x21, 0x00, 0x00,
+};
+static uint8_t Bluetooth_Menu_History;
+
 void Menu_Page_Init(void)
 {
-    char buffer[8];
-    menu_Id_History = 0;
-    menu_Id_Select = 0;
-    menu_Show_Start  = 0;
-    OLED_PrintString(16,1,"->",FONT_8X16);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[0][i];
-    OLED_PrintChinese(32,1,buffer);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[1][i];
-    OLED_PrintChinese(32,3,buffer);
-    for(uint8_t i=0;i<8;i++)
-        buffer[i] = Menu_buffer[2][i];
-    OLED_PrintChinese(32,5,buffer);
+    menu_Id_History = 0xFFU;
+    menu_Id_Select = 0U;
+    Bluetooth_Menu_History = 0xFFU;
 }
-
 
 void Menu_Page_Reflash(void)
 {
-    char buffer[8];
-    if(menu_Id_History != menu_Id_Select)
+    uint8_t status = Bluetooth_Status();
+    uint8_t start, row;
+    if (menu_Id_Select >= MENU_ID_NUMBER) menu_Id_Select = 0U;
+    if (menu_Id_History == menu_Id_Select && Bluetooth_Menu_History == status) return;
+    start = menu_Id_Select > 2U ? menu_Id_Select - 2U : 0U;
+    for (row = 0U; row < 3U; ++row)
     {
-        if(menu_Id_Select>MENU_ID_NUMBER)menu_Id_Select = MENU_ID_NUMBER;
-        OLED_PrintString(16,1,"  ",FONT_8X16);
-        OLED_PrintString(16,3,"  ",FONT_8X16);
-        OLED_PrintString(16,5,"  ",FONT_8X16);
-        if(menu_Id_Select>2)
+        uint8_t item = start + row;
+        uint8_t page = 1U + row * 2U;
+        OLED_PrintString(16,page,item == menu_Id_Select ? "->" : "  ",FONT_8X16);
+        OLED_PrintLine(96,128,page,0U);
+        OLED_PrintLine(96,128,page+1U,0U);
+        if (item == MENU_ID_NUMBER-1U)
         {
-            menu_Show_Start = menu_Id_Select-2;
-            OLED_PrintString(16,5,"->",FONT_8X16);
+            const char *label = status == BT_ON ? "ON" : status == BT_OFF ? "OFF" :
+                                status == BT_BUSY ? "..." : "ERR";
+            OLED_ShowImage(32,page*8U,64,16,Bluetooth_Menu_Text);
+            OLED_PrintString(99,page,(char *)label,FONT_6X8);
         }
-        else
-        {
-            menu_Show_Start = 0;
-            OLED_PrintString(16,(menu_Id_Select<<1)+1,"->",FONT_8X16);
-        }
-//        OLED_PrintChinese(32,1,Menu_buffer[menu_start]);
-//        OLED_PrintChinese(32,3,Menu_buffer[menu_start+1]);
-//        OLED_PrintChinese(32,5,Menu_buffer[menu_start+2]);
-        
-        
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start][i];
-        OLED_PrintChinese(32,1,buffer);
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start+1][i];
-        OLED_PrintChinese(32,3,buffer);
-        for(uint8_t i=0;i<8;i++)
-            buffer[i] = Menu_buffer[menu_Show_Start+2][i];
-        OLED_PrintChinese(32,5,buffer);
-        
-        
-        menu_Id_History = menu_Id_Select;
+        else OLED_PrintChinese(32,page,(char *)Menu_buffer[item]);
     }
-    
+    menu_Id_History = menu_Id_Select;
+    Bluetooth_Menu_History = status;
 }
 
 /************************时间设置界面***************************/
@@ -834,11 +882,12 @@ void CH_Calibration_Page_Reflash(void)
 
 
 
-static PAGE_ID Page_Id_History = page_size;
 void oled_Reflash(void)
 {
     PAGE_ID            page_id = get_PageId();
     static PAGE_FUN_T  page_fun;
+    static uint32_t render_tick;
+    uint32_t now = HAL_GetTick();
     
     if(page_id != Page_Id_History)
     {
@@ -852,6 +901,9 @@ void oled_Reflash(void)
             page_fun.init();
     }
     
+    else if ((uint32_t)(now - render_tick) < 20U) return;
+
+    render_tick = now;
     if(page_fun.refresh != NULL)
         page_fun.refresh();
 }

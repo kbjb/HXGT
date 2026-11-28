@@ -46,3 +46,4 @@ stm32l151\app_code.o: D:\tools\KeilMDK\ARM\ARMCC\Bin\..\include\math.h
 stm32l151\app_code.o: ../Software/inc/agreement_head.h
 stm32l151\app_code.o: ../Software/inc/App_Eep.h
 stm32l151\app_code.o: ../Software/inc/adc_head.h
+stm32l151\app_code.o: ../Software/inc/usart_head.h

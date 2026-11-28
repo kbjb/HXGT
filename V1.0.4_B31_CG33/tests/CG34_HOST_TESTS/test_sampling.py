@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'QINGJIAOBAN/USER/main.c').read_bytes().decode('latin1')
-begin = source.index('        uint32_t now = sensor_tick_ms;')
+begin = source.index('        elapsed = (uint32_t)(now - sample_tick);')
 end = source.index('        /* Displacement and temperature', begin)
 sample_step = source[begin:end]
 test = r'''
@@ -19,12 +19,14 @@ static uint32_t CG_Sample_Interval_Ms, CG_Sample_Overrun_Count;
 static CG_ANGLE_FILTER CG_Angle_Filter;
 static int16_t adc161_aver;
 static unsigned reads;
-struct FakeADC { int16_t ad_data; void (*read)(struct FakeADC *); };
-static void read_adc(struct FakeADC *adc) { reads++; adc->ad_data=1234; }
+struct FakeADC { int16_t ad_data; uint8_t (*read)(struct FakeADC *); };
+static uint8_t spi_ok = 1U;
+static uint8_t read_adc(struct FakeADC *adc) { reads++; adc->ad_data=1234; return spi_ok; }
 static struct FakeADC adc161_str = {0, read_adc};
 static struct { int16_t realValue, StableValue, PreTempValue;
     uint8_t tempCnt, flag; int32_t tempSumValue; } AngleParam;
 static void step(void) {
+    uint32_t now=sensor_tick_ms, elapsed;
 ''' + sample_step + r'''
 }
 int main(void) {
@@ -41,6 +43,8 @@ int main(void) {
     sample_tick=UINT32_MAX-9U; last_sample_tick=sample_tick; sensor_tick_ms=10U;
     step(); assert(reads==52 && CG_Sample_Interval_Ms==20);
     assert(AngleParam.tempSumValue==0 && AngleParam.tempCnt==0);
+    spi_ok=0U; sensor_tick_ms+=20U; step();
+    assert(reads==53 && CG_Angle_Filter.count==2 && adc161_aver==1234);
     puts("CG34 sampling: PASS; 50 Hz, missed-slot recovery, no catch-up burst, tick wrap");
     return 0;
 }

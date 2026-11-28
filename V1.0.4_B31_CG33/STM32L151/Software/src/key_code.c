@@ -4,10 +4,28 @@ static uint32_t Beep_Last_Time  = 0;
 static uint16_t Beep_Touch_Num  = 0;
 static uint16_t Beep_Touch_Time = 0;
 static uint16_t Beep_Touch_Cnt  = 0;
+static uint8_t Battery_Beep_Active;
+static uint32_t Battery_Beep_Start;
+
+void Beep_Low_Battery(void)
+{
+    Battery_Beep_Start = HAL_GetTick();
+    Battery_Beep_Active = 1U;
+    Beep_Touch_Num = 0U;
+    Beep_Touch_Cnt = 0U;
+}
 
 void Beep_Reflash(void)
 {
     uint32_t Beep_Current_Time = HAL_GetTick();
+    if (Battery_Beep_Active)
+    {
+        uint32_t age = Beep_Current_Time - Battery_Beep_Start;
+        if (age >= 360U) Battery_Beep_Active = 0U;
+        HAL_GPIO_WritePin(Beep_Ctrl_GPIO_Port, Beep_Ctrl_Pin,
+                          age < 360U && age % 120U < 60U ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        return;
+    }
     if(Beep_Current_Time - Beep_Last_Time < 5)
         return;
     Beep_Last_Time = Beep_Current_Time;
@@ -33,6 +51,7 @@ void Beep_Reflash(void)
 
 void Beep_Ctrl(uint16_t time,uint16_t cnt)
 {
+    if (Battery_Beep_Active) return;
     Beep_Touch_Time = time;
     Beep_Touch_Num  = cnt;
 }
